@@ -14,10 +14,7 @@ library(httr)
 # updateCheckboxInput(session, inputId, label = NULL, value = NULL)
 # updateTextInput(session, inputId, label = NULL, value = NULL)
 
-library(shiny)
-
-shinyServer(function(input, output, session) {
-
+server <- function(input, output, session) {
   readSessionInfo <- reactive({
     init_table <- list()
     cdata <- session$clientData
@@ -35,16 +32,16 @@ shinyServer(function(input, output, session) {
   # print("isolate(readSessionInfo())")
   session_info <- isolate(readSessionInfo())
   progress <- shiny::Progress$new(session, min=0, max=1)
-  #   if(!is.null(session_info$buildfile)) {
-  #     progress$set(message = 'Preparing for build', detail = '...')
-  #     source(session_info$buildfile)
-  #     buildcnb(session = session)
-  #     return
-  #   }
+#   if(!is.null(session_info$buildfile)) {
+#     progress$set(message = 'Preparing for build', detail = '...')
+#     source(session_info$buildfile)
+#     buildcnb(session = session)
+#     return
+#   }
   # gv <- init_globals(session_info,session)
   progress$set(message = 'Preparing for display', detail = '...')
   return  
-  
+
   # -------------------------------------------------------------------
   # reactiveValues
   # -------------------------------------------------------------------
@@ -81,16 +78,16 @@ shinyServer(function(input, output, session) {
     off_target_bamfile =  vector("list",100),
     log = "" # this is printed on the screen to indicate progress/errors
   )
-  
+
   # Give it the local environment because it needs to modify gv
   source("makeCNTables.R",local=TRUE)
-  
+
   # -------------------------------------------------------------------
   validateInputs <- function(table,current_section) {
-    # -------------------------------------------------------------------
-    # updateNumericInput(session, inputId, label = NULL, value = NULL, min = NULL, max = NULL, step = NULL)
-    # updateCheckboxInput(session, inputId, label = NULL, value = NULL)
-    # updateTextInput(session, inputId, label = NULL, value = NULL)
+  # -------------------------------------------------------------------
+  # updateNumericInput(session, inputId, label = NULL, value = NULL, min = NULL, max = NULL, step = NULL)
+  # updateCheckboxInput(session, inputId, label = NULL, value = NULL)
+  # updateTextInput(session, inputId, label = NULL, value = NULL)
     ret <- TRUE
     if(current_section>=2) {
       ret <- ret && dir_exists_or_can_be_made(gv$input_path)
@@ -105,7 +102,7 @@ shinyServer(function(input, output, session) {
       ret <- ret && url_or_file_exists(gv$chrom_info_file,gv$reference_path)
       ret <- ret && url_or_file_exists(gv$chrom_file,gv$reference_path)
     }
-    
+  
     if(current_section>=3) {
       bam_files <- table[grepl("bams",table$section),]            
       for (i in 1:gv$number_of_samples){
@@ -116,12 +113,12 @@ shinyServer(function(input, output, session) {
         }
       }
     }
-    return(ret)
+  return(ret)
   }
-  
+
   # -------------------------------------------------------------------
   url_or_file_exists <- function(s,spath) {
-    # -------------------------------------------------------------------
+  # -------------------------------------------------------------------
     ret <- TRUE
     if(isURL(s)) {
       url <- parse_url(s)
@@ -138,10 +135,10 @@ shinyServer(function(input, output, session) {
     ret <- FALSE
     return(ret)
   }
-  
+
   # -------------------------------------------------------------------
   dir_exists_or_can_be_made <- function(s) {
-    # -------------------------------------------------------------------
+  # -------------------------------------------------------------------
     if(file.exists(s)) {
       gv$log <- paste0(isolate(gv$log),flog.info("Found %s",s))
       return(TRUE)
@@ -154,10 +151,10 @@ shinyServer(function(input, output, session) {
     gv$log <- paste0(isolate(gv$log),flog.info("Made %s",s))
     return(TRUE)
   }
-  
+
   # -------------------------------------------------------------------
   writeConfigFile <- function(table,filename) {
-    # -------------------------------------------------------------------
+  # -------------------------------------------------------------------
     ret <- TRUE
     configDir <- dirname(filename)
     if(dir_exists_or_can_be_made(configDir)==FALSE) {
@@ -177,90 +174,90 @@ shinyServer(function(input, output, session) {
     gv$log <- paste0(isolate(gv$log),flog.info("Wrote %s",filename))
     return(TRUE)
   }
-  
+
   # -------------------------------------------------------------------
   tableDefaults <- function() {
-    # -------------------------------------------------------------------
-    # Set defaults values for fields
+  # -------------------------------------------------------------------
+  # Set defaults values for fields
     number_of_samples <- gv$max_samples
     params <- NULL
     reference_files <- NULL
     bam_files <- NULL
-    
+  
     names <- c("no_clobber","number_of_cores","number_of_samples","wg_label","targeted_label")
     labels <- c("No Clobber","Number of CPU Cores","Number of Samples","Whole Geneome Label","Targeted Label")
     default_values <- c(TRUE,gv$min_cores,gv$min_samples,"WG","Targeted")
     params <- data.frame(section = "params", name = names,label = labels, value = default_values,stringsAsFactors = FALSE)
     
     names <- c("output_path",
-               "input_path",
-               "config_file",
-               "reference_path",
-               "input_file",
-               "wg_coarse_bedfile",
-               "wg_medium_bedfile",
-               "wg_fine_bedfile",
-               "targeted_bedfile",
-               "off_target_bedfile",
-               "wg_annotation_file",
-               "targeted_annotation_file",
-               "gc_fitting_blacklist",
-               "display_blacklist",
-               "cytobands_file",
-               "chrom_info_file",
-               "chrom_file")
+             "input_path",
+             "config_file",
+             "reference_path",
+             "input_file",
+             "wg_coarse_bedfile",
+             "wg_medium_bedfile",
+             "wg_fine_bedfile",
+             "targeted_bedfile",
+             "off_target_bedfile",
+             "wg_annotation_file",
+             "targeted_annotation_file",
+             "gc_fitting_blacklist",
+             "display_blacklist",
+             "cytobands_file",
+             "chrom_info_file",
+             "chrom_file")
     default_values <- c("./batch_name",
-                        "./input_path",
-                        "config_file.dcf",
-                        "./hg19_exome_reference",
-                        "input_file.txt",
-                        "hg19_wg_coarse.bed",
-                        "hg19_wg_medium.bed",
-                        "hg19_wg_fine.bed",
-                        "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/exome_pull_down_targets/20130108.exome.targets.bed",
-                        "empty.bed",
-                        "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/database/refGene.txt.gz",
-                        "targeted_annotation.bed",
-                        "http://hgdownload.cse.ucsc.edu/goldenpath/hg19/encodeDCC/wgEncodeMapability/wgEncodeDacMapabilityConsensusExcludable.bed.gz",
-                        "http://hgdownload.cse.ucsc.edu/goldenpath/hg19/encodeDCC/wgEncodeMapability/wgEncodeDacMapabilityConsensusExcludable.bed.gz",
-                        "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/database/cytoBand.txt.gz",
-                        "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.chrom.sizes",
-                        "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.2bit")
+                      "./input_path",
+                      "config_file.dcf",
+                      "./hg19_exome_reference",
+                      "input_file.txt",
+                      "hg19_wg_coarse.bed",
+                      "hg19_wg_medium.bed",
+                      "hg19_wg_fine.bed",
+                      "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/exome_pull_down_targets/20130108.exome.targets.bed",
+                      "empty.bed",
+                      "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/database/refGene.txt.gz",
+                      "targeted_annotation.bed",
+                      "http://hgdownload.cse.ucsc.edu/goldenpath/hg19/encodeDCC/wgEncodeMapability/wgEncodeDacMapabilityConsensusExcludable.bed.gz",
+                      "http://hgdownload.cse.ucsc.edu/goldenpath/hg19/encodeDCC/wgEncodeMapability/wgEncodeDacMapabilityConsensusExcludable.bed.gz",
+                      "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/database/cytoBand.txt.gz",
+                      "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.chrom.sizes",
+                      "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.2bit")
     labels <- c("Output path",
-                "Input path",
-                "Config file",
-                "Reference path",
-                "Input file",
-                "WG_coarse_bedfile",
-                "WG_medium_bedfile",
-                "WG fine bedfile",
-                "Targeted bedfile",
-                "Off Target bedfile",
-                "WG annotation bedfile",
-                "Targeted annotation bedfile",
-                "GC Fitting Blacklist",
-                "Display Blacklist",
-                "Cytobands file",
-                "Chromosome info file",
-                "Chromosome sequence file")
+              "Input path",
+              "Config file",
+              "Reference path",
+              "Input file",
+              "WG_coarse_bedfile",
+              "WG_medium_bedfile",
+              "WG fine bedfile",
+              "Targeted bedfile",
+              "Off Target bedfile",
+              "WG annotation bedfile",
+              "Targeted annotation bedfile",
+              "GC Fitting Blacklist",
+              "Display Blacklist",
+              "Cytobands file",
+              "Chromosome info file",
+              "Chromosome sequence file")
     reference_files <- data.frame(section = "files", name = names,label = labels, value = default_values, stringsAsFactors = FALSE)
-    
+  
     wg_bam_files <- data.frame(section = "wg_bams", 
-                               name = paste0("wg_sample_",1:number_of_samples),
-                               label = paste0("Sample Name ",1:number_of_samples), 
-                               value = paste0("sample_wg_",1:number_of_samples,".bam"),
-                               stringsAsFactors = FALSE)
+                            name = paste0("wg_sample_",1:number_of_samples),
+                            label = paste0("Sample Name ",1:number_of_samples), 
+                            value = paste0("sample_wg_",1:number_of_samples,".bam"),
+                            stringsAsFactors = FALSE)
     targeted_bam_files <- data.frame(section = "targeted_bams", 
-                                     name = paste0("targeted_sample_",1:number_of_samples),
-                                     label = paste0("Sample Name ",1:number_of_samples), 
-                                     value = paste0("sample_targeted_",1:number_of_samples,".bam"),
-                                     stringsAsFactors = FALSE)
+                             name = paste0("targeted_sample_",1:number_of_samples),
+                             label = paste0("Sample Name ",1:number_of_samples), 
+                             value = paste0("sample_targeted_",1:number_of_samples,".bam"),
+                             stringsAsFactors = FALSE)
     off_target_bam_files <- data.frame(section = "off_target_bams", 
-                                       name = paste0("off_target_sample_",1:number_of_samples),
-                                       label = paste0("Sample Name ",1:number_of_samples), 
-                                       value = paste0("sample_off_target_",1:number_of_samples,".bam"),
-                                       stringsAsFactors = FALSE)
-    
+                                   name = paste0("off_target_sample_",1:number_of_samples),
+                                   label = paste0("Sample Name ",1:number_of_samples), 
+                                   value = paste0("sample_off_target_",1:number_of_samples,".bam"),
+                                   stringsAsFactors = FALSE)
+  
     targeted_bam_files$label[1] <- "HG00096"
     targeted_bam_files$value[1] <- "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/data/HG00096/exome_alignment/HG00096.chrom20.ILLUMINA.bwa.GBR.exome.20120522.bam"
     off_target_bam_files$label[1] <- "HG00096"
@@ -286,8 +283,8 @@ shinyServer(function(input, output, session) {
   
   # -------------------------------------------------------------------
   tableFromInputs <- function(input) {
-    # -------------------------------------------------------------------
-    # Creates a table from currently visible fields
+  # -------------------------------------------------------------------
+  # Creates a table from currently visible fields
     table <- tableDefaults()
     bam_idx <- grepl("bams",table$section)
     not_bams <- table[!bam_idx,]            
@@ -298,7 +295,7 @@ shinyServer(function(input, output, session) {
       }
     }
     bams <- table[bam_idx,] 
-    
+  
     # number_of_samples <- sum(bam_idx)
     for (s in bams$name) {
       # s <- bams$name[i] 
@@ -309,12 +306,12 @@ shinyServer(function(input, output, session) {
     }
     return(table)
   }
-  
+
   # -------------------------------------------------------------------
   inputsFromTable <- function(table) {
-    # -------------------------------------------------------------------
-    # Set default fields from table
-    #
+  # -------------------------------------------------------------------
+  # Set default fields from table
+  #
     idx_bams <- grepl("bams",table$section)
     bam_files <- table[idx_bams,]
     gv$name  <- bam_files$name
@@ -326,18 +323,18 @@ shinyServer(function(input, output, session) {
     for (s in not_bam_files$name){
       gv[[s]] <- not_bam_files[s,"value"]
     }
-    # updateNumericInput(session, inputId, label = NULL, value = NULL, min = NULL, max = NULL, step = NULL)
-    # updateCheckboxInput(session, inputId, label = NULL, value = NULL)
-    # updateTextInput(session, inputId, label = NULL, value = NULL)
+  # updateNumericInput(session, inputId, label = NULL, value = NULL, min = NULL, max = NULL, step = NULL)
+  # updateCheckboxInput(session, inputId, label = NULL, value = NULL)
+  # updateTextInput(session, inputId, label = NULL, value = NULL)
   }
-  
-  # -------------------------------------------------------------------
-  # observers
-  # -------------------------------------------------------------------
-  #   observeEvent(input$no_clobber, {
-  #       gv$no_clobber <- input$no_clobber
-  #     })
-  
+
+# -------------------------------------------------------------------
+# observers
+# -------------------------------------------------------------------
+#   observeEvent(input$no_clobber, {
+#       gv$no_clobber <- input$no_clobber
+#     })
+
   observeEvent(input$input_file_button, {
     gv$log <- ""
     # browser()
@@ -350,12 +347,12 @@ shinyServer(function(input, output, session) {
     gv$log <- paste0(isolate(gv$log),flog.info("Successfully read config file %s stored locally as %s",input$input_file_button$name,filename))
     gv$read_defaults_from_file <- TRUE
     rownames(table) <- table$name
-    
+
     gv$defaults_from_file <- table
     inputsFromTable(table)
     isValid <- validateInputs(input,1)
   })
-  
+
   observeEvent(input$number_of_samples, {
     if(gv$current_section==1) {
       num_samples <- as.integer(input$number_of_samples)
@@ -365,7 +362,7 @@ shinyServer(function(input, output, session) {
       updateNumericInput(session, inputId = "number_of_samples", value = gv$number_of_samples )
     }
   })
-  
+
   observeEvent(input$section_next, {
     print(paste0("section_next: ",gv$current_section))
     gv$log <- ""
@@ -432,7 +429,7 @@ shinyServer(function(input, output, session) {
     }
     ret
   })
-  
+
   output$section_2 <- renderUI({  
     ret <- NULL
     if(gv$current_section>=2) {
@@ -461,7 +458,7 @@ shinyServer(function(input, output, session) {
     }
     ret
   })
-  
+
   output$section_3 <- renderUI({  
     ret <- NULL
     if(gv$current_section>=3) {
@@ -498,7 +495,7 @@ shinyServer(function(input, output, session) {
     }
     ret
   })
-  
+
   output$section_4 <- renderUI({  
     ret <- NULL
     if(gv$current_section==4) {
@@ -506,12 +503,12 @@ shinyServer(function(input, output, session) {
       gv$dcf_filename <- file.path(input$output_path,input$config_file)
       writeConfigFile(table,gv$dcf_filename)
       ret <- append(ret,list(
-        hr(),
-        div(
-          actionButton("section_prev", "Prev",  icon = icon("arrow-left")),
-          actionButton("section_next", "Run Build",  icon = icon("gears"))
-        ),
-        hr()
+      hr(),
+      div(
+        actionButton("section_prev", "Prev",  icon = icon("arrow-left")),
+        actionButton("section_next", "Run Build",  icon = icon("gears"))
+      ),
+      hr()
       ))
     }
     ret
@@ -528,12 +525,12 @@ shinyServer(function(input, output, session) {
     ret
   })
   output$log_message <- renderText({  
-    if(nchar(gv$log) > 0) {
-      gv$log
-    } else {
-      NULL
-    }
-  })
-  
-  # -------------------------------------------------------------------
-})
+     if(nchar(gv$log) > 0) {
+       gv$log
+     } else {
+       NULL
+     }
+ })
+
+# -------------------------------------------------------------------
+}

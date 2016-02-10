@@ -4,8 +4,9 @@ args <- commandArgs(TRUE)
 # args <- "/home/jmarkham/mm/cnv/buildcnb/141021_SN1055_0231_AHB0YBADXX/buildcnb_input.dcf"
 # args <- "/home/jmarkham/mm/cnv/buildcnb/151229_NS500817_0038_AHLNJMBGXX/buildcnb_input.dcf"
 # args <- "/home/jmarkham/mm/cnv/buildcnb/151218_NS500817_0037_AHLWC5BGXX/buildcnb_input.dcf"  
-
 # makeCNTables("/home/jmarkham/mm/cnv/buildcnb/super_batch_1_2/config_file.dcf")
+# args <- "/home/jmarkham/mm/cnv/buildcnb/super_batch_1_2/buildcnb_input.dcf"
+
 if(length(args)!=1) {
   print("Builds files for cnb. Usage: makeCNTables.R /path/to/config_file.dcf")  
   return(1)
@@ -44,15 +45,15 @@ flog.info("Found RSubread version: %s",Rsubread_version)
 
 # -------------------------------------------------------------------
 makeCNTables <- function(configFileName) {
-  # -------------------------------------------------------------------
+# -------------------------------------------------------------------
   # setwd("~/mm/cnv/buildcnb") # for debugging
   # print("makeCNTables()")
-  
+
   # This is the useful bit that makes all the tables that the CN browser needs
   if(!exists("gv")) {
     flog.info("Running makeCNTables() stand-alone with config file: %s",configFileName)
   } # For stand-alone
-  
+
   df_cfg <- ftry(read.dcf(configFileName))
   if(length(df_cfg)==1) {
     gv$log <- paste0(isolate(gv$log),flog.error("Unable to read config file: %s",configFileName))
@@ -61,13 +62,13 @@ makeCNTables <- function(configFileName) {
   gv$log <- paste0(isolate(gv$log),flog.info("Successfully read config file: %s",configFileName))
   df_cfg <- as.data.frame(df_cfg,stringsAsFactors=FALSE)
   rownames(df_cfg) <- df_cfg$name
-  
+
   no_clobber <- as.logical(df_cfg["no_clobber","value"])
   output_path <- df_cfg["output_path","value"]
   reference_path <- df_cfg["reference_path","value"]
   chrom_info_file <- df_cfg["chrom_info_file","value"]
   number_of_samples <- as.integer(df_cfg["number_of_samples","value"])
-  
+
   df_cfg <- df_cfg[!(row.names(df_cfg) %in% paste0("sample_",(number_of_samples+1):1000)), ] # remove extras
   
   bedfiles <- grep("bedfile",row.names(df_cfg),value=TRUE) 
@@ -84,23 +85,19 @@ makeCNTables <- function(configFileName) {
   # Put in paths in refs - except for input_file
   idx <- grepl("files",df_cfg$section) & !grepl("path",row.names(df_cfg)) & !hasPath(df_cfg$value) & !grepl("input_file",row.names(df_cfg))
   df_cfg$value[idx] <- file.path(df_cfg["reference_path","value"],df_cfg$value[idx])
-  
+
   optionally_make_bins(wg_coarse_bin_size,df_cfg["wg_coarse_bedfile","value"],df_cfg)
   optionally_make_bins(wg_medium_bin_size,df_cfg["wg_medium_bedfile","value"],df_cfg)
   optionally_make_bins(wg_fine_bin_size,df_cfg["wg_fine_bedfile","value"],df_cfg)
-  
+
   ret <- sapply(bedfiles,optionally_make_gc,df_cfg)
-  
-  #row <- list(name="chr_alias",section="files",label="chr alias",value="chr_alias.csv")
-  #row.name(row) <- chr_alias
-  #df_cfg <- rbind(df_cfg,row)
-  
+
   optionally_make_aliases(df_cfg)
   cnb_table_entry <-  do.call("rbind",lapply(bedfiles,optionally_make_counts,df_cfg))
-  #   gc_cor_file <- file.path(output_path <- df_cfg["output_path","value"],"gc_cor_all.tsv")
-  #   write.table(gc_cor_df,gc_cor_file,row.names=FALSE,quote = FALSE,sep="\t")
+#   gc_cor_file <- file.path(output_path <- df_cfg["output_path","value"],"gc_cor_all.tsv")
+#   write.table(gc_cor_df,gc_cor_file,row.names=FALSE,quote = FALSE,sep="\t")
   optionally_make_infile(cnb_table_entry,annotation_files,df_cfg) 
-  make_all_gc_plots(df_cfg)
+  # make_all_gc_plots(df_cfg)
   # TODO: OPTIONALLY : Pre-make best reference, blacklists from inter and intra-sample variability
 }
 
@@ -148,7 +145,7 @@ bedrow2gcrow <- function(s,df) {
 isURL <- function(s) { return(grepl("^https://",s) | grepl("^http://",s) | grepl("^ftp://",s)) }
 hasPath <- function(s) { return(grepl("/",s)) }
 # -------------------------------------------------------------------
-
+  
 # -------------------------------------------------------------------
 remove_files_by_suffix  <- function(suffix) {
   files <- list.files(pattern=paste0("*.",suffix)) 
@@ -177,7 +174,8 @@ optionally_make_counts  <-  function(bedfile,df_cfg) {
   # If needed Make read counts with featureCounts
   bed_type <- sub("_bedfile","",df_cfg[bedfile,"name"])
   output_path <- df_cfg["output_path","value"]
-  bam_type <- sub("_.*$","",sub("^off_","",bed_type))
+  # bam_type <- sub("_.*$","",sub("^off_","",bed_type))
+  bam_type <- sub("_.*$","",bed_type)
   df_bamfiles <- df_cfg[grepl("bams",df_cfg$section) & grepl(bam_type,df_cfg$section),]
   num_samples <- nrow(df_bamfiles)
   df_cnb <-  do.call("rbind",lapply(1:num_samples,write_gc_corrected_counts,df_bamfiles,bedfile,df_cfg))
@@ -210,6 +208,7 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
     gr_bedfile <- import.bed(bedpath)
     mcols(gr_bedfile) <- df_id
     annotation_file <- createAnnotationFile(gr_bedfile)
+    system("vmstat -S M -s")
     if(Rsubread_version=="1.16.1") {
       fc <- featureCounts(files=df_bamfiles[idx,"value"],
                           isPairedEnd=TRUE,
@@ -233,6 +232,7 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
                           fraction = TRUE,     
                           chrAliases = chrAliasesFile)
     }
+    system("vmstat -S M -s")
     save_list_elements <- function(s) { write.table(fc[[s]],sub(".tsv$",paste0("_fc_",s,".tsv"),outfile),quote = FALSE,sep="\t") }
     lapply(names(fc), save_list_elements) # save everything that featureCounts() returns
     # remove temporary files
@@ -276,7 +276,7 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
     binCorrection <- median(binSize) / binSize
     
     df_gc$counts  <- binCorrection * df_gc$counts
-    
+
     idx <- df_gc$counts>loess_min_usable_counts & df_gc$gc>loess_min_usable_gc
     
     if(!is.na(df_cfg["gc_fitting_blacklist","value"])) {
@@ -312,8 +312,9 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
     correction <- max(correction) / correction
     gc_corrected <- correction * df_gc$counts
     # Combine bedfile with counts 
-    df <- cbind(df_bedfile[,1:3],gc_corrected,df_gc$counts,df_gc$gc)
-    colnames(df) <- c("chr","start","end","cor","raw","gc")
+    df <- df_gc
+    df$cor <- gc_corrected
+    colnames(df)[colnames(df)=="counts"] <- "raw"
     df$cor[is.na(df$cor)] <- 0 # shouldn't be but is sometimes
     if(!is.na(df_cfg["display_blacklist","value"])) {
       gv$log <- paste0(isolate(gv$log),flog.info("Reading display blacklist"))    
@@ -343,7 +344,7 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
 
 # -------------------------------------------------------------------
 optionally_download <- function(svalue,df_cfg) {
-  # -------------------------------------------------------------------
+# -------------------------------------------------------------------
   no_clobber <- as.logical(df_cfg["no_clobber","value"])
   s <- df_cfg[svalue,"value"]
   dest_path <- df_cfg["reference_path","value"]
@@ -460,7 +461,7 @@ make_gc_plot <- function(gc_file) {
   df_gc <- df_gc[idx,]
   df_gc$cor <- log10(df_gc$cor)
   df_gc$raw <- log10(df_gc$raw)
-  
+
   loess_predict <- loess(raw ~ gc, data = df_gc,  span = loess_span) # subset = !blacklist, span=TODO?
   correction <- predict(loess_predict,df_gc)
   df_correctable <- df_gc[!is.na(correction),]
@@ -503,3 +504,4 @@ if(length(args)==1) {
   makeCNTables(args) 
   quit(save = "no", status = 0)
 }
+
