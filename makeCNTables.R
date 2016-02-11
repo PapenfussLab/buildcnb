@@ -214,6 +214,9 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
     mcols(gr_bedfile) <- df_id
     annotation_file <- createAnnotationFile(gr_bedfile)
     # system("vmstat -S M -s")
+    # change into destination directory to avoid temp file collisions
+    cwd <- getwd()
+    setwd(output_path)
     if(Rsubread_version=="1.16.1") {
       fc <- featureCounts(files=df_bamfiles[idx,"value"],
                           isPairedEnd=TRUE,
@@ -238,6 +241,7 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
                           chrAliases = chrAliasesFile)
     }
     # system("vmstat -S M -s")
+    setwd(cwd)
     save_list_elements <- function(s) { write.table(fc[[s]],sub(".tsv$",paste0("_fc_",s,".tsv"),outfile),quote = FALSE,sep="\t") }
     lapply(names(fc), save_list_elements) # save everything that featureCounts() returns
     # remove temporary files
