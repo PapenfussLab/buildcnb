@@ -3,16 +3,12 @@ library(shiny)
 library(futile.logger)
 library(RCurl)
 library(httr)
+
+# TODO: Test with new cnb
 # TODO: validateInputs() is called too much. Also, say what it found and validate - URL or file
 # TODO: BUG: Problem with forward button AFTER back and no changes
-# TODO: BUG: Using file offset for plot offset. Not a big difference.
-# TODO: proper limits on cores and samples
-# TODO: Offset everything
+# TODO: Offset everything from LH page margin
 # TODO: Help links?
-# TODO: Use these for initialisation.
-# updateNumericInput(session, inputId, label = NULL, value = NULL, min = NULL, max = NULL, step = NULL)
-# updateCheckboxInput(session, inputId, label = NULL, value = NULL)
-# updateTextInput(session, inputId, label = NULL, value = NULL)
 
 server <- function(input, output, session) {
   readSessionInfo <- reactive({
@@ -206,23 +202,23 @@ server <- function(input, output, session) {
              "cytobands_file",
              "chrom_info_file",
              "chrom_file")
-    default_values <- c("./batch_name",
-                      "./input_path",
+    default_values <- c("batch_name",
+                      "input_path",
                       "config_file.dcf",
-                      "./hg19_exome_reference",
+                      "panel_name",
                       "input_file.txt",
-                      "hg19_wg_coarse.bed",
-                      "hg19_wg_medium.bed",
-                      "hg19_wg_fine.bed",
-                      "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/technical/reference/exome_pull_down_targets/20130108.exome.targets.bed",
-                      "empty.bed",
-                      "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/database/refGene.txt.gz",
-                      "targeted_annotation.bed",
-                      "http://hgdownload.cse.ucsc.edu/goldenpath/hg19/encodeDCC/wgEncodeMapability/wgEncodeDacMapabilityConsensusExcludable.bed.gz",
-                      "http://hgdownload.cse.ucsc.edu/goldenpath/hg19/encodeDCC/wgEncodeMapability/wgEncodeDacMapabilityConsensusExcludable.bed.gz",
-                      "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/database/cytoBand.txt.gz",
-                      "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.chrom.sizes",
-                      "http://hgdownload.cse.ucsc.edu/goldenPath/hg19/bigZips/hg19.2bit")
+                      "panel_name/hg19_wg_coarse.bed",
+                      "panel_name/hg19_wg_medium.bed",
+                      "panel_name/hg19_wg_fine.bed",
+                      "panel_name/panel_targeted_bins.bed",
+                      "panel_name/panel_off_target_bins.bed",
+                      "all_panels/hg19_exons.tsv",
+                      "panel_name/targeted_annotation.bed",
+                      "panel_name/panel_excluded_from_gc_correction.bed",
+                      "panel_name/panel_excluded_from_display.bed",
+                      "all_panels/cytoBand.txt.gz",
+                      "all_panels/chromInfo.txt.gz",
+                      "all_panels/hg19.fa")
     labels <- c("Output path",
               "Input path",
               "Config file",
