@@ -1,15 +1,15 @@
 #!/usr/bin/Rscript --vanilla
 args <- commandArgs(TRUE)
 
-# args <- "/home/jmarkham/mm/cnv/buildcnb/141021_SN1055_0231_AHB0YBADXX/buildcnb_input.dcf"
-# args <- "/home/jmarkham/mm/cnv/buildcnb/151229_NS500817_0038_AHLNJMBGXX/buildcnb_input.dcf"
-# args <- "/home/jmarkham/mm/cnv/buildcnb/151218_NS500817_0037_AHLWC5BGXX/buildcnb_input.dcf"  
-# makeCNTables("/home/jmarkham/mm/cnv/buildcnb/super_batch_1_2/config_file.dcf")
-# args <- "/home/jmarkham/mm/cnv/buildcnb/super_batch_1_2/buildcnb_input.dcf"
+# For testing
+DEBUG <- FALSE
+if(DEBUG){ args <- "/home/jmarkham/mm/cnv/buildcnb/super_batch_1_2/buildcnb_input.dcf" }
 
-if(length(args)!=1) {
-  print("Builds files for cnb. Usage: makeCNTables.R /path/to/config_file.dcf")  
-  return(1)
+isCommandLine <- !DEBUG && args[1]!="RStudio" &&  !grepl("R$",args)
+
+if(length(args)!=1 && isCommandLine) {
+  print("Builds files for cnb. Usage: makeCNTables.R /path/to/config_file.dcf")
+  quit(save = "no", status = 0)
 } 
 
 library(futile.logger)
@@ -19,9 +19,6 @@ library(Rsubread)
 library(Biostrings)
 library(rtracklayer)
 library(ggplot2)
-# library(data.table)
-
-
 
 if(!exists("gv")) {
   session <- NULL
@@ -39,9 +36,14 @@ loess_min_usable_counts  <- 50 # For fitting
 loess_min_usable_gc  <- 0.25 
 loess_span <- 0.4
 loess_bin_width <- 0.01
+bed2bamtypes <- data.frame(bamtypes =c ("wg","wg","wg","targeted","targeted"), 
+                           bedtypes = c("wg_coarse","wg_fine","wg_medium","targeted","off_target"),
+                           stringsAsFactors=FALSE)
+rownames(bed2bamtypes) <- bed2bamtypes$bedtypes
+  
 ip <- (installed.packages())
 Rsubread_version <- ip["Rsubread","Version"]
-flog.info("Found RSubread version: %s",Rsubread_version)
+if(DEBUG) { gv$log <- paste0(isolate(gv$log),flog.info("Found RSubread version: %s",Rsubread_version)) }
 
 # -------------------------------------------------------------------
 makeCNTables <- function(configFileName) {
@@ -174,12 +176,14 @@ optionally_make_counts  <-  function(bedfile,df_cfg) {
   # If needed Make read counts with featureCounts
   bed_type <- sub("_bedfile","",df_cfg[bedfile,"name"])
   output_path <- df_cfg["output_path","value"]
-  # bam_type <- sub("_.*$","",sub("^off_","",bed_type))
-  bam_type <- sub("_.*$","",bed_type)
+  bam_type <-  bed2bamtypes[bed_type,"bamtypes"]
   df_bamfiles <- df_cfg[grepl("bams",df_cfg$section) & grepl(bam_type,df_cfg$section),]
   num_samples <- nrow(df_bamfiles)
-  df_cnb <-  do.call("rbind",lapply(1:num_samples,write_gc_corrected_counts,df_bamfiles,bedfile,df_cfg))
-  return(df_cnb)
+  if(num_samples>0) {
+    df_cnb <-  do.call("rbind",lapply(1:num_samples,write_gc_corrected_counts,df_bamfiles,bedfile,df_cfg))
+    return(df_cnb)
+  }
+  return(NULL)
 }
 
 # -------------------------------------------------------------------
@@ -497,10 +501,12 @@ make_gc_plot <- function(gc_file) {
   ggsave(filename=plot_file, plot=p)
 }
 
-if(length(args)==1) { 
-  #gc_file <- "/home/jmarkham/mm/cnv/buildcnb/super_batch_1_2/1005Tum-Ag_targeted.tsv"
-  #make_gc_plot(gc_file) 
-  #return(0)
+if(DEBUG) { 
+  makeCNTables(args) 
+  return(0)
+}
+
+if(isCommandLine) {
   makeCNTables(args) 
   quit(save = "no", status = 0)
 }
