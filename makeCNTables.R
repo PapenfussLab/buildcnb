@@ -2,10 +2,10 @@
 args <- commandArgs(TRUE)
 
 # For testing
-DEBUG <- FALSE
-if(DEBUG){ args <- "/home/jmarkham/mm/cnv/buildcnb/super_batch_1_2/buildcnb_input.dcf" }
+RSTUDIO_DEBUG <- FALSE
+if(RSTUDIO_DEBUG){ args <- "/home/jmarkham/mm/cnv/buildcnb/super_batch_1_2/buildcnb_input.dcf" }
 
-isCommandLine <- !DEBUG && args[1]!="RStudio" &&  !grepl("R$",args)
+isCommandLine <- !RSTUDIO_DEBUG && args[1]!="RStudio" &&  !grepl("R$",args)
 
 if(length(args)!=1 && isCommandLine) {
   print("Builds files for cnb. Usage: makeCNTables.R /path/to/config_file.dcf")
@@ -501,7 +501,7 @@ make_gc_plot <- function(gc_file) {
   ggsave(filename=plot_file, plot=p)
 }
 
-if(DEBUG) { 
+if(RSTUDIO_DEBUG) { 
   makeCNTables(args) 
   return(0)
 }

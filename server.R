@@ -4,7 +4,8 @@ library(futile.logger)
 library(RCurl)
 library(httr)
 
-# TODO: Test with new cnb
+# TODO: Test with gui and new makeCNTables()
+# 
 # TODO: validateInputs() is called too much. Also, say what it found and validate - URL or file
 # TODO: BUG: Problem with forward button AFTER back and no changes
 # TODO: Offset everything from LH page margin
