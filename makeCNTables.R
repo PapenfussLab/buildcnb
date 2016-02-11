@@ -84,6 +84,7 @@ makeCNTables <- function(configFileName) {
   # Put in paths in bams
   idx <- grepl("bams",df_cfg$section) & !hasPath(df_cfg$value)
   df_cfg$value[idx] <- file.path(df_cfg["input_path","value"],df_cfg$value[idx])
+
   # Put in paths in refs - except for input_file
   idx <- grepl("files",df_cfg$section) & !grepl("path",row.names(df_cfg)) & !hasPath(df_cfg$value) & !grepl("input_file",row.names(df_cfg))
   df_cfg$value[idx] <- file.path(df_cfg["reference_path","value"],df_cfg$value[idx])
@@ -212,7 +213,7 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
     gr_bedfile <- import.bed(bedpath)
     mcols(gr_bedfile) <- df_id
     annotation_file <- createAnnotationFile(gr_bedfile)
-    system("vmstat -S M -s")
+    # system("vmstat -S M -s")
     if(Rsubread_version=="1.16.1") {
       fc <- featureCounts(files=df_bamfiles[idx,"value"],
                           isPairedEnd=TRUE,
@@ -236,7 +237,7 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
                           fraction = TRUE,     
                           chrAliases = chrAliasesFile)
     }
-    system("vmstat -S M -s")
+    # system("vmstat -S M -s")
     save_list_elements <- function(s) { write.table(fc[[s]],sub(".tsv$",paste0("_fc_",s,".tsv"),outfile),quote = FALSE,sep="\t") }
     lapply(names(fc), save_list_elements) # save everything that featureCounts() returns
     # remove temporary files
@@ -301,11 +302,23 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
         return(NULL)
       }
     )
-    # TODO: Look into problems when loess fails
+    
     if(is.null(loess_predict)) {
       correction <- double(length=nrow(df_gc)) + 1
     } else {
-      correction <- predict(loess_predict,df_gc)
+      # Even predict fails
+      correction <- tryCatch(
+        predict(loess_predict,df_gc),
+        error=function(cond) { 
+          message("Loess predict failed:") 
+          gv$log <- paste0(isolate(gv$log),flog.info("Loess predict failed: %s",cond))
+          return(NULL)
+        }
+      )
+      if(is.null(correction)) {
+        loess_predict <- NULL
+        correction <- double(length=nrow(df_gc)) + 1  
+      }
     }
     df_correctable <- df_gc[!is.na(correction),]
     correction_not_na <- correction[!is.na(correction)]
