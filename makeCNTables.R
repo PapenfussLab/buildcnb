@@ -389,6 +389,11 @@ optionally_download <- function(svalue,df_cfg) {
 
 # -------------------------------------------------------------------
 optionally_make_bins <- function(bin_size,bedfile,df_cfg) {
+  if(is.na(bedfile) || length(bedfile<1)) {
+    gv$log <- paste0(isolate(gv$log),flog.warn("Skipping bedfile for bin size %d",bin_size))  
+    df <- data.frame(chr = character(0), start = integer(0), end = integer(0),id = integer(0), score = integer(0), strand = character(0))
+    return(df)
+  }
   reference_path <- df_cfg["reference_path","value"]
   chrom_info_file <- df_cfg["chrom_info_file","value"]
   no_clobber <- as.logical(df_cfg["no_clobber","value"])
