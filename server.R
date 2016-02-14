@@ -257,18 +257,6 @@ server <- function(input, output, session) {
                                    value = paste0("sample_off_target_",1:number_of_samples,".bam"),
                                    stringsAsFactors = FALSE)
   
-    targeted_bam_files$label[1] <- "HG00096"
-    targeted_bam_files$value[1] <- "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/data/HG00096/exome_alignment/HG00096.chrom20.ILLUMINA.bwa.GBR.exome.20120522.bam"
-    off_target_bam_files$label[1] <- "HG00096"
-    off_target_bam_files$value[1] <- "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/data/HG00096/exome_alignment/HG00096.chrom20.ILLUMINA.bwa.GBR.exome.20120522.bam"
-    wg_bam_files$label[1] <- "HG00096"
-    wg_bam_files$value[1] <- "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/data/HG00096/alignment/HG00096.chrom20.ILLUMINA.bwa.GBR.low_coverage.20120522.bam"
-    targeted_bam_files$label[2] <- "HG00097"
-    targeted_bam_files$value[2] <- "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/data/HG00097/exome_alignment/HG00097.chrom20.ILLUMINA.bwa.GBR.exome.20120522.bam"
-    off_target_bam_files$label[2] <- "HG00097"
-    off_target_bam_files$value[2] <- "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/data/HG00097/exome_alignment/HG00097.chrom20.ILLUMINA.bwa.GBR.exome.20120522.bam"
-    wg_bam_files$label[2] <- "HG00097"
-    wg_bam_files$value[2] <- "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/data/HG00097/alignment/HG00097.chrom20.ILLUMINA.bwa.GBR.low_coverage.20120522.bam"
     toTable <- rbind(params,reference_files,wg_bam_files,targeted_bam_files,off_target_bam_files)
     rownames(toTable) <- toTable$name
     # Put in defaults from the file if there is a slot for them
