@@ -269,7 +269,7 @@ server <- function(input, output, session) {
     off_target_bam_files$value[2] <- "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/data/HG00097/exome_alignment/HG00097.chrom20.ILLUMINA.bwa.GBR.exome.20120522.bam"
     wg_bam_files$label[2] <- "HG00097"
     wg_bam_files$value[2] <- "ftp://ftp.1000genomes.ebi.ac.uk/vol1/ftp/phase3/data/HG00097/alignment/HG00097.chrom20.ILLUMINA.bwa.GBR.low_coverage.20120522.bam"
-    toTable <- rbind(params,reference_files,wg_bam_files,targeted_bam_files)
+    toTable <- rbind(params,reference_files,wg_bam_files,targeted_bam_files,off_target_bam_files)
     rownames(toTable) <- toTable$name
     # Put in defaults from the file if there is a slot for them
     if(gv$read_defaults_from_file) {
@@ -473,6 +473,7 @@ server <- function(input, output, session) {
         wg_bamfile_val <- gv$value[gv$name==wg_bamfile_id]
         targeted_bamfile_val<- gv$value[gv$name==targeted_bamfile_id]
         off_target_bamfile_val<- gv$value[gv$name==off_target_bamfile_id]
+        # TODO: Deal with situation when no targeted bam file
         sample_label <- gv$label[gv$name==targeted_bamfile_id]
         row <- div(
           column(3,offset = 0.1,textInput(inputId = sample_name_id, label = paste0("Sample Name ",i), value = sample_label)),
