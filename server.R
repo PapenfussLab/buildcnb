@@ -4,8 +4,9 @@ library(futile.logger)
 library(RCurl)
 library(httr)
 
-# TODO: Test with new cnb
-# TODO: validateInputs() is called too much. Also, say what it found and validate - URL or file
+# TODO: BUG: Problem with forward button AFTER back and no changes
+# TODO: Help file as dest of help links
+# TODO: infile has lots of lines with NA in them - sometimes
 # TODO: BUG: Problem with forward button AFTER back and no changes
 # TODO: Offset everything from LH page margin
 # TODO: Help links?
