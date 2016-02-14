@@ -1,5 +1,5 @@
 #!/usr/bin/Rscript --vanilla
-args <- commandArgs(TRUE)
+args <- commandArgs(FALSE)
 
 # For testing
 RSTUDIO_DEBUG <- FALSE
@@ -43,7 +43,7 @@ rownames(bed2bamtypes) <- bed2bamtypes$bedtypes
   
 ip <- (installed.packages())
 Rsubread_version <- ip["Rsubread","Version"]
-if(DEBUG) { gv$log <- paste0(isolate(gv$log),flog.info("Found RSubread version: %s",Rsubread_version)) }
+if(RSTUDIO_DEBUG) { gv$log <- paste0(isolate(gv$log),flog.info("Found RSubread version: %s",Rsubread_version)) }
 
 # -------------------------------------------------------------------
 makeCNTables <- function(configFileName) {

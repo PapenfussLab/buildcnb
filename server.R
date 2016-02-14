@@ -126,7 +126,10 @@ server <- function(input, output, session) {
     } else if(file.exists(file.path(spath,s))) {
       gv$log <- paste0(isolate(gv$log),flog.info("Found %s",s))          
       return(ret)
-    }  
+    } else if(file.exists(s)) {
+      gv$log <- paste0(isolate(gv$log),flog.info("Found %s",s))          
+      return(ret)
+    }   
     gv$log <- paste0(isolate(gv$log),flog.error("Unable to find %s",s)) 
     ret <- FALSE
     return(ret)
