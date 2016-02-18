@@ -5,11 +5,9 @@ library(RCurl)
 library(httr)
 
 # TODO: BUG: Problem with forward button AFTER back and no changes
+# TODO: featureCounts() to split fragment contributions between matching probes - or de-convolve?
 # TODO: Help file as dest of help links
-# TODO: infile has lots of lines with NA in them - sometimes
-# TODO: BUG: Problem with forward button AFTER back and no changes
 # TODO: Offset everything from LH page margin
-# TODO: Help links?
 
 server <- function(input, output, session) {
   readSessionInfo <- reactive({

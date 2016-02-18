@@ -237,6 +237,13 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
                           useMetaFeatures = TRUE,
                           allowMultiOverlap = TRUE,
                           minOverlap = 60,
+# TODO: Deconvolve this?
+#                           reportReads = TRUE # Probably not. Writes out too much
+#                           checkFragLength = TRUE
+#                           minOverlap = 119,
+#                           minFragLength =  150, # absolute limits, but perhaps a narrow window may minimise bias?
+#                           maxFragLength = 1500,
+                    
                           fraction = TRUE,     
                           chrAliases = chrAliasesFile)
     }
@@ -250,7 +257,6 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
   
   if(file.exists(outfile) && no_clobber) {
     gv$log <- paste0(isolate(gv$log),flog.info("Skipping GC correction for for %s / %s",bedfile,bamname))
-    cnb_table_entry <- list(file = bed_type, path = outfile)
     df_cnb <- df_bamfiles[idx,]
     df_cnb$type <- bed_type
     df_cnb$value <- outfile
@@ -275,27 +281,27 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
     annotation <- fc$annotation
     df_counts <- cbind(counts,annotation)
     rownames(df_counts) <- paste0(df_counts$Chr,":",df_counts$Start,"-",df_counts$End)
-    idx <- paste0(df_gc$chr,":",df_gc$start,"-",df_gc$end)
+    idx_chr_start_end <- paste0(df_gc$chr,":",df_gc$start,"-",df_gc$end)
     if(nrow(df_gc) != nrow(counts)) {
       gv$log <- paste0(isolate(gv$log),flog.error("Number of raw counts does not match GC correction bins: %d != %d",nrow(df_gc),length(counts)))  
     }
-    df_gc$counts <- df_counts[idx,"counts"]
+    df_gc$counts <- df_counts[idx_chr_start_end,"counts"]
     
     binSize <- df_gc$end - df_gc$start + 1
     binCorrection <- median(binSize) / binSize
     
     df_gc$counts  <- binCorrection * df_gc$counts
 
-    idx <- df_gc$counts>loess_min_usable_counts & df_gc$gc>loess_min_usable_gc
+    idx_gc_fit <- df_gc$counts>loess_min_usable_counts & df_gc$gc>loess_min_usable_gc
     
     if(!is.na(df_cfg["gc_fitting_blacklist","value"])) {
       gv$log <- paste0(isolate(gv$log),flog.info("Reading GC blacklist"))    
       gc_fitting_blacklist  <- import.bed(df_cfg["gc_fitting_blacklist","value"])
       gv$log <- paste0(isolate(gv$log),flog.info("Finding overlaps"))    
-      idx <- is.na(findOverlaps(gr_gc,gc_fitting_blacklist,select="first")) & idx 
+      idx_gc_fit <- is.na(findOverlaps(gr_gc,gc_fitting_blacklist,select="first")) & idx_gc_fit 
     }
     gv$log <- paste0(isolate(gv$log),flog.info("Done"))    
-    df_gc_fit <- df_gc[idx,]
+    df_gc_fit <- df_gc[idx_gc_fit,]
     
     # loess_predict <- loess(counts ~ gc, data = df_gc_fit,  span = loess_span) # subset = !blacklist, span=TODO?
     loess_predict <- tryCatch(
@@ -340,8 +346,8 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
     if(!is.na(df_cfg["display_blacklist","value"])) {
       gv$log <- paste0(isolate(gv$log),flog.info("Reading display blacklist"))    
       display_blacklist  <- import.bed(df_cfg["display_blacklist","value"])
-      idx <- is.na(findOverlaps(gr_gc,display_blacklist,select="first"))
-      df <- df[idx,]
+      idx_not_black_listed <- is.na(findOverlaps(gr_gc,display_blacklist,select="first"))
+      df <- df[idx_not_black_listed,]
     }
     gv$log <- paste0(isolate(gv$log),flog.info("Writing GC corrected counts: %s",outfile))
     ftry(write.table(df,file=outfile,row.names=FALSE,sep="\t",quote = FALSE))
