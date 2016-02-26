@@ -5,7 +5,10 @@ library(RCurl)
 library(httr)
 
 # TODO: BUG: Problem with forward button AFTER back and no changes
+# TODO: Example text and help links beside text boxes
+# TODO: GC correction in WG? Look at super and germline
 # TODO: featureCounts() to split fragment contributions between matching probes - or de-convolve?
+# TODO: Call cnb helper.R to pre-build things
 # TODO: Help file as dest of help links
 # TODO: Offset everything from LH page margin
 
@@ -183,7 +186,7 @@ server <- function(input, output, session) {
     bam_files <- NULL
   
     names <- c("no_clobber","number_of_cores","number_of_samples","wg_label","targeted_label")
-    labels <- c("No Clobber","Number of CPU Cores","Number of Samples","Whole Geneome Label","Targeted Label")
+    labels <- c("No Clobber","Number of CPU Cores","Number of Samples","Whole Genome Label","Targeted Label")
     default_values <- c(TRUE,gv$min_cores,gv$min_samples,"WG","Targeted")
     params <- data.frame(section = "params", name = names,label = labels, value = default_values,stringsAsFactors = FALSE)
     
@@ -402,7 +405,7 @@ server <- function(input, output, session) {
       column(2,numericInput("number_of_samples", "Number of Samples",  value = gv$number_of_samples,min = gv$min_samples, max = gv$max_samples)),
       column(2,numericInput("number_of_cores", "Number of CPU Cores",  value = gv$number_of_cores,min = gv$min_cores, max = gv$max_cores)),
       column(3,textInput("targeted_label", label = "Targeted Label", value = gv$targeted_label)),
-      column(3,textInput("wg_label", label = "Whole Geneome Label", value = gv$wg_label))
+      column(3,textInput("wg_label", label = "Whole Genome Label", value = gv$wg_label))
     )))
     if(gv$current_section==1) {
       ret <- append(ret,list(

@@ -2,7 +2,7 @@
 ui <- fluidPage(
   # Some custom CSS
   tags$head(
-    h3("Configure Copy Number Build"),
+    h3("Configure Copy Number Builder"),
     tags$style(HTML("
         /* Smaller font for preformatted text */
         pre, table.table {
