@@ -1,11 +1,11 @@
 #!/usr/bin/Rscript --vanilla
-args <- commandArgs(FALSE)
+args <- commandArgs(TRUE)
 
 # For testing
 RSTUDIO_DEBUG <- FALSE
 if(RSTUDIO_DEBUG){ args <- "/home/jmarkham/mm/cnv/buildcnb/super_batch_1_2/buildcnb_input.dcf" }
 
-isCommandLine <- !RSTUDIO_DEBUG && args[1]!="RStudio" &&  !grepl("R$",args)
+isCommandLine <- !RSTUDIO_DEBUG && length(args)>0 && args[1]!="RStudio" &&  !grepl("R$",args) 
 
 if(length(args)!=1 && isCommandLine) {
   print("Builds files for cnb. Usage: makeCNTables.R /path/to/config_file.dcf")
@@ -36,6 +36,7 @@ loess_min_usable_counts  <- 50 # For fitting
 loess_min_usable_gc  <- 0.25 
 loess_span <- 0.4
 loess_bin_width <- 0.01
+minimum_overlap <- 120
 bed2bamtypes <- data.frame(bamtypes =c ("wg","wg","wg","targeted","targeted"), 
                            bedtypes = c("wg_coarse","wg_fine","wg_medium","targeted","off_target"),
                            stringsAsFactors=FALSE)
@@ -70,7 +71,9 @@ makeCNTables <- function(configFileName) {
   reference_path <- df_cfg["reference_path","value"]
   chrom_info_file <- df_cfg["chrom_info_file","value"]
   number_of_samples <- as.integer(df_cfg["number_of_samples","value"])
-
+  for (var in c("minimum_overlap","wg_fine_bin_size","wg_medium_bin_size","wg_coarse_bin_size")){
+    if(!is.na(df_cfg[var,"value"])) { assign(var,df_cfg[var,"value"]) }
+  }
   df_cfg <- df_cfg[!(row.names(df_cfg) %in% paste0("sample_",(number_of_samples+1):1000)), ] # remove extras
   
   bedfiles <- grep("bedfile",row.names(df_cfg),value=TRUE) 
@@ -225,7 +228,7 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
                           nthreads = number_of_cores,
                           useMetaFeatures = TRUE,
                           allowMultiOverlap = TRUE,
-                          minReadOverlap = 60,
+                          minReadOverlap = minimum_overlap,
                           chrAliases = chrAliasesFile)
     }
     else {
@@ -236,14 +239,13 @@ write_gc_corrected_counts <- function(idx,df_bamfiles,bedfile,df_cfg) {
                           nthreads = number_of_cores,
                           useMetaFeatures = TRUE,
                           allowMultiOverlap = TRUE,
-                          minOverlap = 60,
-# TODO: Deconvolve this?
+                          largestOverlap = TRUE,
+                          minOverlap = minimum_overlap,
 #                           reportReads = TRUE # Probably not. Writes out too much
 #                           checkFragLength = TRUE
 #                           minOverlap = 119,
 #                           minFragLength =  150, # absolute limits, but perhaps a narrow window may minimise bias?
 #                           maxFragLength = 1500,
-                    
                           fraction = TRUE,     
                           chrAliases = chrAliasesFile)
     }
