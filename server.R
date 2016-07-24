@@ -8,9 +8,15 @@ library(httr)
 # TODO: Example text and help links beside text boxes
 # TODO: GC correction in WG? Look at super and germline
 # TODO: featureCounts() to split fragment contributions between matching probes - or de-convolve?
-# TODO: Call cnb helper.R to pre-build things
 # TODO: Help file as dest of help links
 # TODO: Offset everything from LH page margin
+# 
+# TODO: buildcnv - make extra columns for data files and for tabe of files (sex, ref, bin size)
+# TODO: Pre-prepare and store annotation files for later use
+# TODO: recognise pre-built with: chr  start  end  gc ref_median, ref_mad, ref_var, N, Ns, raw, cor
+# Outfile with Sex, RefName, BinSize, RefPoolSize,...
+# Put in ref_median-based  mad = 1.4826*sd as safety?
+# BAFS?
 
 server <- function(input, output, session) {
   readSessionInfo <- reactive({
