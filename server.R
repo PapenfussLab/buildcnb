@@ -6,18 +6,9 @@ library(httr)
 
 # TODO: BUG: Problem with forward button AFTER back and no changes
 # TODO: Example text and help links beside text boxes
-# TODO: GC correction in WG? Look at super and germline
-# TODO: featureCounts() to split fragment contributions between matching probes - or de-convolve?
 # TODO: Help file as dest of help links
 # TODO: Offset everything from LH page margin
-# 
-# TODO: buildcnv - make extra columns for data files and for tabe of files (sex, ref, bin size)
-# TODO: Pre-prepare and store annotation files for later use
-# TODO: recognise pre-built with: chr  start  end  gc ref_median, ref_mad, ref_var, N, Ns, raw, cor
-# Outfile with Sex, RefName, BinSize, RefPoolSize,...
-# Put in ref_median-based  mad = 1.4826*sd as safety?
-# BAFS?
-
+# TODO: lapply for loops and put in some sort of general lock file and alternative clobber
 server <- function(input, output, session) {
   readSessionInfo <- reactive({
     init_table <- list()
