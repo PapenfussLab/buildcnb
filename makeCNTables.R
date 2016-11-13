@@ -1,22 +1,20 @@
 #!/usr/bin/env Rscript
 #!/usr/bin/Rscript --vanilla
 args <- commandArgs(TRUE)
-# For testing
-# setwd("/media/sf_big/gaffa")
-# OR
-# setwd("~/mm/cnv/buildcnb")
+# 
+# setwd("~/mm/cnv/buildcnb") # For testing
 # debugSource('~/mm/cnv/buildcnb/makeCNTables.R', echo=TRUE)
-# RSUBREAD_VERSION <- NULL
-# RSUBREAD_VERSION <- "1.23.4" # Wei-Shi's latest
-RSUBREAD_VERSION <- "1.23.5" # My hacked one
-USE_OWN_RSUBREAD <- TRUE
+# RSUBREAD_VERSION <- "1.23.5" # My hacked one based on 1.23.4
+RSUBREAD_VERSION <- "1.24.0" # Latest stable
+# TOD
+# USE_OWN_RSUBREAD <- TRUE
+USE_OWN_RSUBREAD <- FALSE
+
 # RSTUDIO_DEBUG <- TRUE
 RSTUDIO_DEBUG <- (length(args)==0)
 
-if(RSTUDIO_DEBUG){ args <- "buildcnb_test_160330_NS500817_0055_AH27FYBGXY.dcf" }
-if(RSTUDIO_DEBUG){ args <- "buildcnb_input_160426_NS500817_0060_AH3FYWBGXY.dcf" }
-if(RSTUDIO_DEBUG){ args <- "haem_v1/160818/buildcnb_input.dcf" }
-if(RSTUDIO_DEBUG){ args <- if(RSTUDIO_DEBUG){ args <- "PanHaem_v1.1/PanHaem_v1.1_160815_NS500817_0080_AHKN2VBGXY.dcf" } }
+if(RSTUDIO_DEBUG){ args <- if(RSTUDIO_DEBUG){ args <- "PanHaem_v1.1/160330_NS500817_0055_AH27FYBGXY/PanHaem_v1.1_160330_NS500817_0055_AH27FYBGXY.dcf" } }
+if(RSTUDIO_DEBUG){ args <- if(RSTUDIO_DEBUG){ args <- "/media/sf_big/gaffa/PanHaem_v1.1/PanHaem_v1.1_160815_NS500817_0080_AHKN2VBGXY.dcf" } }
 
 isCommandLine <- !RSTUDIO_DEBUG && length(args)>0 && args[1]!="RStudio" &&  !grepl("R$",args) 
 
@@ -47,10 +45,10 @@ libnames <- c(
   "DNAcopy",
   "Hmisc",
   "modeest",
+  "R.utils",
   "corrplot"
   )
 for (libname in libnames) { 
-  # suppressWarnings() ?
   suppressPackageStartupMessages(library(libname,character.only=TRUE,warn.conflicts=FALSE,quietly=TRUE))
 }
 
@@ -62,10 +60,11 @@ if(!exists("gv")) {
 } # For stand-alone
 
 # Some globals
+SPAWN_EXTERNAL_ALIGNER <- TRUE # execute external aligner using system2() ?
 WG_COARSE_BIN_SIZE <- 1000000
 WG_MEDIUM_BIN_SIZE <- 50000
 WG_SMALL_BIN_SIZE <- 5000
-TARGETED_BIN_SIZE <- 120 # supplied in the bed file, but for me it's about the bait size
+TARGETED_BIN_SIZE <- 119 # supplied in the bed file, but for me it's about the bait size
 CBS_ALPHA = 0.01
 CBS_NPERM = 10000
 LOESS_SCALES_BADLY_LIMIT  <- 100000 # when loess gets slow
@@ -73,10 +72,11 @@ LOESS_MIN_USABLE_COUNTS  <- 50 # For fitting
 LOESS_MIN_USABLE_GC  <- 0.25 
 LOESS_SPAN <- 0.4
 LOESS_BIN_WIDTH <- 0.01
-MINIMUM_OVERLAP <- 120
+MINIMUM_OVERLAP <- 70 
 NORM_CUTOFF <- 10   # Counts in a bin less that this are thrown away for normalisation
 MEDIAN_NORM_CUTOFF <- 10   # Counts in a bin with a dist whose median less that this are thrown away for ALL normalisation
 MODE_NORM_CUTOFF <- 100   # Counts in a bin with a dist whose mode less that this are thrown away for mode-based normalisation
+MAX_PROPORTION_ZERO_ENTRIES <- 0.6 # If more than this proportion of counts is zero, something is wrong.
 MEDIAN_DATA_POINTS_CUTOFF <- 3
 MODE_DATA_POINTS_CUTOFF <- 3
 COUNTS_CUTOFF <- 10   # Counts less that this are thrown away for CN estimation
@@ -97,7 +97,12 @@ DF_BEDTYPE2BAMTYPE <- data.frame(bamtypes =c ("wg","wg","wg","targeted","targete
                            bedfilename = c("wg_coarse_bedfile","wg_fine_bedfile","wg_medium_bedfile","targeted_bedfile","off_target_bedfile"),
                            binsize = c(WG_COARSE_BIN_SIZE,WG_SMALL_BIN_SIZE,WG_MEDIUM_BIN_SIZE,TARGETED_BIN_SIZE,TARGETED_BIN_SIZE),
                            stringsAsFactors=FALSE)
-# TODO: From input file section, select whether to have WG annotation or not
+DF_FILETYPES <- data.frame(
+  filetype = c("alias","bin","gc_table","reference","reference","bam","count","corrected_count","vcf","baf","deletion","deletions_zscore","translocation","infile"),
+  per_sample  = c(FALSE,FALSE,FALSE,     FALSE,     FALSE,      TRUE, TRUE ,   TRUE,             TRUE,  TRUE,  TRUE,    TRUE,              TRUE,           FALSE),
+  per_bedtype = c(FALSE,TRUE, TRUE,      FALSE,     TRUE,       FALSE,TRUE,    TRUE,           FALSE ,FALSE,  FALSE,   TRUE,              FALSE,          FALSE),
+  stringsAsFactors=FALSE)
+
 ANNOTATION_FILES  <- c("wg_annotation_file","targeted_annotation_file","cytobands_file","chrom_info_file")
 BEDTYPE2BAMTYPE <- DF_BEDTYPE2BAMTYPE$bamtypes
 BEDTYPES <- DF_BEDTYPE2BAMTYPE$bedtypes
@@ -131,10 +136,6 @@ makeCNTables <- function(configFileName) {
   gv$log <<- paste0(isolate(gv$log),flog.info("Found RSubread version: %s Installed base version: %s",Rsubread_version,Rsubread_base_version))
   gv$log <<- paste0(isolate(gv$log),flog.info("Successfully read config file: %s",configFileName))
   df_ip <- installed.packages()
-  gv$log <<- paste0(isolate(gv$log),flog.info("----------------------------------------------------------------------------------"))
-  gv$log <<- paste0(isolate(gv$log),flog.info("%d installed packages:",nrow(df_ip)))
-  print(df_ip[,c("Version","Built")])
-  gv$log <<- paste0(isolate(gv$log),flog.info("----------------------------------------------------------------------------------"))
   df_cfg <- as.data.frame(df_cfg,stringsAsFactors=FALSE)
   rownames(df_cfg) <- df_cfg$name
   number_of_samples <- as.integer(df_cfg["number_of_samples","value"])
@@ -148,60 +149,59 @@ makeCNTables <- function(configFileName) {
   DF_CFG <<- df_cfg
   CFG <<-  as.list(df_cfg$value)
   names(CFG) <<- df_cfg$name
+  CFG[CFG=="TRUE"] <<- TRUE
+  CFG[CFG=="FALSE"] <<- FALSE  
   SAMPLES <<- makesamplelist(df_cfg)
   if(length(SAMPLES)==0) { return (FALSE)}
+  LOG_FILE <- gsub(".t.[tv]$",".log",CFG$input_file)  
+  USED_PACKAGES_FILE <- gsub(".t.[tv]$",".used_packages.tsv",CFG$input_file)  
   # No more modification of globals after this point
-  # TODO: Put this in pipeline
-  # make_all_deletions_stats()
-    
-  # Make fixed width bins and GC content for WG
-  ret <- sapply(BEDTYPES[!grepl("off_target",BEDTYPES)],make_bins)
-  ret <- sapply(BEDTYPES[!grepl("off_target",BEDTYPES)],make_gc) # TODO lapply and use ret
-  make_aliases()  # TODO: lapply
-  if(!(is.null(CFG$prebuild_references) || is.na(CFG$prebuild_references) || CFG$prebuild_references=="FALSE")) {
-    # Make the references unless specifically told not to
-    # TODO: If not building references, and don't have any, fall back to previous versions.
-    df_pre_built_references <- do.call("rbind.fill",lapply(BEDTYPES[!grepl("off_target",BEDTYPES)],makeAllReferences)) # TODO: lapply over samples
-  } else {
-    df_pre_built_references  <- NULL
+  gv$log <<- paste0(isolate(gv$log),"\n",sessionInfo())
+  gv$log <<- paste0(isolate(gv$log),flog.info("Writing installed packages list to %s",USED_PACKAGES_FILE))
+  write.table(installed.packages(),USED_PACKAGES_FILE,sep="\t",quote = FALSE)
+  
+  df_table <- NULL
+  make_what <- strsplit(CFG$make_what,",")[[1]]
+  df_filetypes <- DF_FILETYPES[DF_FILETYPES$filetype %in% make_what,]
+  for(j in 1:nrow(df_filetypes)) {
+    row <-df_filetypes[j,] 
+    if(row$per_sample) { samples <- SAMPLES } else { samples = "" }
+    if(row$per_bedtype) { bedtypes <- BEDTYPES[!grepl("off_target",BEDTYPES)] } else { bedtypes = "" }
+    if(row$filetype == "infile") { df_arg <- df_table } else { df_arg = "" }
+    df_something <- make_something(row$filetype,bedtypes,samples,df_arg)
+    df_table <- rbind.fill(df_table,df_something)
   }
-  make_bams() # TODO: lapply
-  make_vcfs() # TODO: lapply
-  df_bafs_tables <- make_bafs() # TODO: lapply
-  df_cnb_table_entry <-  do.call("rbind.fill",lapply(BEDTYPES[!grepl("off_target",BEDTYPES)],make_counts))  # TODO: lapply over samples
-  df_deletions_table <- make_deletions() # TODO: lapply
-  df_translocations <- make_translocations() # TODO: lapply
-  make_infile(rbind.fill(df_cnb_table_entry,df_deletions_table,df_bafs_tables,df_translocations,df_pre_built_references)) 
-  # make_all_gc_plots(df_cfg) # TODO: lapply
-  output_log_file <- gsub(".t.[tv]$",".log",CFG$input_file)
-  write.table(gv$log,output_log_file,row.names = FALSE,col.names=FALSE,quote=FALSE)
-  # make_deletions_stats() # TODO: lapply
+  write.table(gv$log,LOG_FILE,row.names = FALSE,col.names=FALSE,quote=FALSE)
   return(0)
 }
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-make_infile <- function(df_cnb_table_entry) {
+make_infiles <- function(df_cnb_table_entry) {
   no_clobber <- CFG$no_clobber
   input_file <- CFG$input_file
-  if((!file.exists(input_file) || no_clobber==FALSE)) {
-    input_df <- as.data.frame(DF_CFG[ANNOTATION_FILES,])
-    input_df$file <-"reference"
-    input_df$sample <- input_df$name
-    input_df$resolution <- ifelse(grepl("targeted",input_df$name),"targeted","wg")
-    input_df$is_targeted <- grepl("targeted",input_df$name)
-    input_df$is_wgs <- !grepl("targeted",input_df$name)
-    colnames(input_df)[colnames(input_df)=="value"] <- "path"
-    output_df <- rbind.fill(input_df,df_cnb_table_entry)
-    output_df$section <- NULL
-    output_df$value <- NULL
-    output_df$label <- NULL
-    output_df$name <- NULL
+  input_df <- as.data.frame(DF_CFG[ANNOTATION_FILES,])
+  input_df$file <-"reference"
+  input_df$sample <- input_df$name
+  input_df$resolution <- ifelse(grepl("targeted",input_df$name),"targeted","wg")
+  input_df$is_targeted <- grepl("targeted",input_df$name)
+  input_df$is_wgs <- !grepl("targeted",input_df$name)
+  colnames(input_df)[colnames(input_df)=="value"] <- "path"
+  output_df <- rbind.fill(input_df,df_cnb_table_entry)
+  output_df$section <- NULL
+  output_df$value <- NULL
+  output_df$label <- NULL
+  output_df$name <- NULL
+  
+  if(!file_no_clobber(input_file) && file_apply_lock(input_file)) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",input_file))
-    ret <- ftry(write.table(output_df,input_file,row.names=FALSE,sep="\t",quote = FALSE))
+    ftry(write.table(output_df,input_file,row.names=FALSE,sep="\t",quote = FALSE))
+    file_remove_lock(destfile)
   } else {
     gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",input_file))
   }
+  
+  return(output_df)
 }
 # -------------------------------------------------------------------
 
@@ -299,6 +299,10 @@ makepath <- function(panel = NULL,
       ret <- file.path(base_path,panel,run,sample,filetype_path,paste0(sample,extension))
     }
   } else if (filetype == "reference") {
+    # If the reference path is an absolute one then do not append to base
+    if(isAbsolutePath(filetype_path)) {
+      base_path <- ""
+    }		
     if(is.null(panel)) { ret <- file.path(base_path,filetype_path) }
     else if(is.null(run)) { ret <- file.path(base_path,filetype_path,panel) }
     else if(is.null(sample)) { ret <- file.path(base_path,filetype_path,panel,run) }
@@ -375,7 +379,6 @@ makesamplelist <- function(df_cfg) {
   
 # -------------------------------------------------------------------
 download_files <- function(svalue,df_cfg) {
-  no_clobber <- as.logical(df_cfg$value["no_clobber"])
   s <- df_cfg[svalue,"value"]
   label <- df_cfg[svalue,"label"]
   dest_path <- CFG$reference_path
@@ -388,7 +391,7 @@ download_files <- function(svalue,df_cfg) {
     url <- parse_url(s)
     filename <- basename(url$path)
     destfile <- file.path(dest_path,filename)
-    if((!file.exists(destfile) || no_clobber==FALSE)) {
+    if(!file_no_clobber(destfile) && file_apply_lock(destfile)) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Downloading %s",destfile))          
       ret <- ftry(download.file(s,destfile))
       if(ret==0) {
@@ -396,7 +399,8 @@ download_files <- function(svalue,df_cfg) {
       } else {
         gv$log <<- paste0(isolate(gv$log),flog.error("Unable to download file: %s from %s",destfile,s))
       }
-    }  
+      file_remove_lock(destfile)
+    }
   }
 }
 # -------------------------------------------------------------------
@@ -411,50 +415,131 @@ remove_files_by_suffix  <- function(suffix) {
 }
 # -------------------------------------------------------------------
 
-
 # -------------------------------------------------------------------
-make_aliases <- function() {
-  chrAliasesFile <- file.path(CFG$chr_alias)
-  no_clobber <- as.logical(CFG$no_clobber)
-  gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",chrAliasesFile))
-  if((!file.exists(chrAliasesFile) || no_clobber==FALSE)) {
-    nochr <- c(paste0("",c(1:22)),"X","Y")
-    chr<- c(paste0("chr",c(1:22)),"chrX","chrY")
-    chrAliases <- data.frame(x=c(nochr,chr), X=c(chr,nochr))
-    ret <- ftry(write.csv(chrAliases,chrAliasesFile,row.names=FALSE,quote = FALSE))
+file_no_clobber  <- function(filename) {
+  if(!file.exists(filename)) {
+    gv$log <<- paste0(isolate(gv$log),flog.info("File does not exist: %s",filename))
+    return(FALSE)
   }
-  gv$log <<- paste0(isolate(gv$log),flog.info("Have: %s",chrAliasesFile))
+  if (!file_is_locked(filename) && CFG$no_clobber==FALSE) {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Clobbering: %s",filename))
+    return(FALSE)
+  }
+  if (file_is_locked(filename) && CFG$clobber_locked_files) {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Removing previous version of locked file: %s",filename))
+    unlink(filename)
+    file_release_lock(filename)
+    return(FALSE)
+  }
+  gv$log <<- paste0(isolate(gv$log),flog.info("File already exists: %s",filename))
+  return(TRUE)
 }
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-make_counts  <-  function(bedtype) {
-  refs <- readAllReferences(bedtype)
-  if(length(refs)==0) {
-    gv$log <<- paste0(isolate(gv$log),flog.error("Unable to find references.")) 
-    return (NULL)
+file_apply_lock  <- function(filename) {
+  lockfile <- paste0(filename,".lock")
+  gv$log <<- paste0(isolate(gv$log),flog.info("Locking file: %s",filename))
+  ret <- tryCatch({
+    if(!file.exists(lockfile)) {
+      write(flog.info("Created lock: %s",filename),file = lockfile)
+    } else {
+      gv$log <<- paste0(isolate(gv$log),flog.warn("Already locked: %s",filename))
+      write(flog.info("Relocked"),file = lockfile,append = TRUE)
+    }
+    return(TRUE)
+  }, error = function(err) {
+    gv$log <<- paste0(isolate(gv$log),flog.error("Unable to write lock: %s",filename))
+    return(FALSE)
+  })
+  return(ret)
+}
+# -------------------------------------------------------------------
+# -------------------------------------------------------------------
+file_remove_lock  <- function(filename) {
+  lockfile <- paste0(filename,".lock")
+  gv$log <<- paste0(isolate(gv$log),flog.info("Unlocking file: %s",filename))
+  if(file.exists(lockfile)) {
+    unlink(lockfile)
+  } else {
+    gv$log <<- paste0(isolate(gv$log),flog.warn("No lock for file: %s",filename))
   }
+}
+# -------------------------------------------------------------------
+
+# -------------------------------------------------------------------
+file_is_locked  <- function(filename) { return(file.exists(paste0(filename,".lock")))}
+# -------------------------------------------------------------------
+
+# -------------------------------------------------------------------
+make_something <- function(filetype,bedtypes = "",samples = "", df_arg = NULL) {
+  gv$log <<- paste0(isolate(gv$log),flog.info("------------------------------------------------------------"))
+  gv$log <<- paste0(isolate(gv$log),flog.info("make_%ss : n_bedtypes = %d n_samples = %d",filetype,length(bedtypes),length(samples)))
+  gv$log <<- paste0(isolate(gv$log),flog.info("------------------------------------------------------------"))
+  remaining_filetypes <- paste0(filetype,",",sub(paste0("^.*",filetype,","),"",paste(DF_FILETYPES$filetype,collapse=',')))
+  gv$log <<- paste0(isolate(gv$log),flog.info("Recover from here with make_what=%s and clobber_locked_files=TRUE",remaining_filetypes))
+  
+  df <- NULL
+  for (sample in samples) {
+    for (bedtype in bedtypes) {
+      args  <- list()
+      if(sample != "") { args$sample = sample }
+      if(bedtype != "") { args$bedtype = bedtype }
+      if(is.data.frame(df_arg)) { args$df = df_arg }
+      gv$log <<- paste0(isolate(gv$log),flog.info("sample = %s bedtype = %s",sample,bedtype))
+      df_something <- do.call(paste0("make_",filetype,"s"),args) 
+      df <- rbind(df,df_something)
+    }
+  }
+  return(df)
+}
+# -------------------------------------------------------------------
+
+
+# -------------------------------------------------------------------
+make_aliass <- function() {
+  chrAliasesFile <- file.path(CFG$chr_alias)
+  gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",chrAliasesFile))
+  if(!file_no_clobber(chrAliasesFile) && file_apply_lock(chrAliasesFile)) {
+    nochr <- c(paste0("",c(1:22)),"X","Y")
+    chr<- c(paste0("chr",c(1:22)),"chrX","chrY")
+    chrAliases <- data.frame(x=c(nochr,chr), X=c(chr,nochr))
+    ret <- ftry(write.csv(chrAliases,chrAliasesFile,row.names=FALSE,quote = FALSE))
+    file_remove_lock(chrAliasesFile)
+  }
+  gv$log <<- paste0(isolate(gv$log),flog.info("Have: %s",chrAliasesFile))
+  return(NULL)
+}
+# -------------------------------------------------------------------
+
+# -------------------------------------------------------------------
+make_counts  <-  function(sample,bedtype) {
+  bedfile <- BEDFILENAMES[bedtype]
+  gv$log <<- paste0(isolate(gv$log),flog.info("Making counts for %d samples with %s and %s",length(SAMPLES),bedfile,bedtype))
+  write_corrected_counts(sample,bedfile,"counts")
+  return(NULL)
+}
+# -------------------------------------------------------------------
+# -------------------------------------------------------------------
+make_corrected_counts  <-  function(sample,bedtype) {
   df_cnb <- NULL
   bedfile <- BEDFILENAMES[bedtype]
   gv$log <<- paste0(isolate(gv$log),flog.info("Making counts for %d samples with %s and %s",length(SAMPLES),bedfile,bedtype))
-  df_cnb <-  do.call("rbind.fill",lapply(1:length(SAMPLES),write_corrected_counts,SAMPLES,bedfile,refs))
+  df_cnb <-  write_corrected_counts(sample,bedfile,"corrected_counts")
   gv$log <<- paste0(isolate(gv$log),flog.info("Processed %d samples.",nrow(df_cnb)))
   return(df_cnb)
 }
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-write_corrected_counts <- function(idx,samples,bedfile,references) {
-  sample <- samples[idx]
-  gv$log <<- paste0(isolate(gv$log),flog.info("Sample # %d is %s.",idx,sample))
-  bed_type <- BEDFILENAME2BEDTYPE[bedfile] # targeted, off_target, wg_coarse, wg_medium, wg_fine
-  bam_type <-  BEDTYPE2BAMTYPE[bed_type] # wg, targeted, off_target
-  no_clobber <- as.logical(CFG$no_clobber)
+write_corrected_counts <- function(sample,bedfile,do_what) {
+  bedtype <- BEDFILENAME2BEDTYPE[bedfile] # targeted, off_target, wg_coarse, wg_medium, wg_fine
+  bam_type <-  BEDTYPE2BAMTYPE[bedtype] # wg, targeted, off_target
   number_of_cores <- as.integer(CFG$number_of_cores)
   bampath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "bam",extension = ".bam",df_cfg = DF_CFG)
   bamfile <- basename(bampath)
   correct_gc <- as.logical(DF_CFG[paste0(bam_type,"_gc_correct"),"value"])
-  outpath <- makepath(panel = CFG$panel,run = CFG$run_path,sample = sample,filetype = "cnv",resolution = bed_type, extension = ".tsv",df_cfg = DF_CFG)
+  outpath <- makepath(panel = CFG$panel,run = CFG$run_path,sample = sample,filetype = "cnv",resolution = bedtype, extension = ".tsv",df_cfg = DF_CFG)
   cnb_info_path <- sub(".tsv$","_info.tsv",outpath)
   countspath <- sub(".tsv$","_fc_counts.tsv",outpath)
   annotationpath <- sub(".tsv$","_fc_annotation.tsv",outpath)
@@ -463,7 +548,7 @@ write_corrected_counts <- function(idx,samples,bedfile,references) {
   
   # Write entry for input file for cnb
   df_cnb <- data.frame(
-    resolution = bed_type,
+    resolution = bedtype,
     path = outpath,
     file = "counts",
     name = sample,
@@ -473,18 +558,20 @@ write_corrected_counts <- function(idx,samples,bedfile,references) {
     sex = "unknown",
     tumour_normal = "unknown",
     stringsAsFactors = FALSE)
-  
-  df_reference_file_list <- read.table(CFG$reference_file_list,header = TRUE,stringsAsFactors = FALSE)
-  if(sum(grepl("Sex",colnames(df_reference_file_list)))>0) {
-    df_cnb$sex <- df_reference_file_list$Sex[df_reference_file_list$SampleName==df_cnb$label][1]  
-  }
-  if(sum(grepl("Tumour",colnames(df_reference_file_list)))>0) {
-    df_cnb$tumour_normal <- df_reference_file_list$TumourNormal[df_reference_file_list$SampleName==df_cnb$label][1]
-  }
-  
-  if(file.exists(annotationpath) && no_clobber) {
-    gv$log <<- paste0(isolate(gv$log),flog.info("Skipping making annotations for: %s / %s. Already have %s",bedfile,sample,annotationpath))
+  if(do_what=="counts") {
+    df_reference_file_list <- NULL
   } else {
+    df_reference_file_list <- read.table(CFG$reference_file_list,header = TRUE,stringsAsFactors = FALSE)
+    if(sum(grepl("Sex",colnames(df_reference_file_list)))>0) {
+      df_cnb$sex <- df_reference_file_list$Sex[df_reference_file_list$SampleName==df_cnb$label][1]
+    }
+    if(sum(grepl("Tumour",colnames(df_reference_file_list)))>0) {
+      df_cnb$tumour_normal <- df_reference_file_list$TumourNormal[df_reference_file_list$SampleName==df_cnb$label][1]
+    }
+  }   
+  
+
+  if(do_what=="counts" && (!file_no_clobber(annotationpath)) && file_apply_lock(annotationpath)) {    
     gv$log <<- paste0(isolate(gv$log),flog.info("Making %s",annotationpath))
     df_bedfile <- read.table(bedpath,header=FALSE,stringsAsFactors=FALSE)
     colnames(df_bedfile) <- c('chr','start','end','id','score')
@@ -493,45 +580,50 @@ write_corrected_counts <- function(idx,samples,bedfile,references) {
     mcols(gr_bedfile) <- df_id
     annotation_file <- createAnnotationFile(gr_bedfile)
     write.table(annotation_file,annotationpath,row.names=FALSE,sep="\t",quote = FALSE)
+    file_remove_lock(annotationpath)  
   }
   
-  if(file.exists(countspath) && no_clobber) {
-    gv$log <<- paste0(isolate(gv$log),flog.info("Skipping making counts for: %s / %s. Already have %s",bedfile,sample,countspath))
-  } else {
+
+  if(do_what=="counts" && (!file_no_clobber(countspath)) && file_apply_lock(countspath)) {    
     gv$log <<- paste0(isolate(gv$log),flog.info("Making counts for: %s / %s. In %s",bedfile,sample,countspath))
     gv$log <<- paste0(isolate(gv$log),flog.info("This bit takes a long time - of order 1 min/10^6 reads/bedfile or 1 hour/5GB/bedfile."))
     # system("vmstat -S M -s")
     # change into destination directory to avoid temp file collisions
     cwd <- getwd()
-    chrAliasesFile <- file.path(cwd,chrAliasesFile)
-    annotationpath <- file.path(cwd,annotationpath)
-    bampath <- file.path(cwd,bampath)
+    chrAliasesFile <- ifelse(isAbsolutePath(chrAliasesFile),chrAliasesFile,file.path(cwd,chrAliasesFile))
+    annotationpath <- ifelse(isAbsolutePath(annotationpath),annotationpath,file.path(cwd,annotationpath))
+    bampath <- ifelse(isAbsolutePath(bampath),bampath,file.path(cwd,bampath))
     setwd(dirname(bampath))
     if(Rsubread_version=="1.16.1") {
       fc <- featureCounts(files=bamfile,
                           isPairedEnd=TRUE,
                           annot.ext=annotationpath,
-                          countMultiMappingReads=TRUE,
                           nthreads = number_of_cores,
                           useMetaFeatures = TRUE,
-                          allowMultiOverlap = TRUE,
+                          ignoreDup = FALSE, # may or may not be what you want
+                          countMultiMappingReads = TRUE,
                           minReadOverlap = MINIMUM_OVERLAP,
+                          requireBothEndsMapped = FALSE,
+                          allowMultiOverlap = TRUE,
+                          fraction = TRUE,
                           chrAliases = chrAliasesFile)
     }
     else {
       fc <- featureCounts(files=bamfile,
                           isPairedEnd=TRUE,
                           annot.ext=annotationpath,
-                          countMultiMappingReads=TRUE,
                           nthreads = number_of_cores,
                           useMetaFeatures = TRUE,
-                          allowMultiOverlap = TRUE,
                           largestOverlap = TRUE,
                           minOverlap = MINIMUM_OVERLAP,
                           fraction = TRUE,     
+                          ignoreDup = FALSE, # may or may not be what you want
+                          countMultiMappingReads = TRUE,
+                          requireBothEndsMapped = FALSE,
+                          allowMultiOverlap = TRUE,
+                          checkFragLength=FALSE,
                           chrAliases = chrAliasesFile)
     }
-    # system("vmstat -S M -s")
     gv$log <<- paste0(isolate(gv$log),flog.info("Removing temporary files from %s",dirname(bampath)))
     lapply(c("fixbam","sam","tmp","bin"), remove_files_by_suffix)
     setwd(cwd)
@@ -539,10 +631,10 @@ write_corrected_counts <- function(idx,samples,bedfile,references) {
     lapply(names(fc), save_list_elements) # save everything that featureCounts() returns
     # remove temporary files
     lapply(c("fixbam","sam","tmp","bin"), remove_files_by_suffix)
+    file_remove_lock(countspath)  
   }
-
-
-  if(file.exists(outpath) && no_clobber) {
+  
+  if(do_what=="counts" || (do_what=="corrected_counts" && file_no_clobber(outpath))) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Skipping GC correction, segmentation, reference correction for %s / %s",bedfile,sample))
     if(file.exists(cnb_info_path)) {
       df_cnb_saved <- read.table(cnb_info_path,header=TRUE,stringsAsFactors=FALSE)
@@ -552,7 +644,8 @@ write_corrected_counts <- function(idx,samples,bedfile,references) {
       gv$log <<- paste0(isolate(gv$log),flog.warn("Unable to find %s but pressing on regardless.",cnb_info_path))
     }
     return(df_cnb)
-  } else {
+  } else if(do_what=="corrected_counts"){
+    file_apply_lock(outpath)
     fc <- list()
     fc$counts <- read.table(countspath,header=TRUE,stringsAsFactors=FALSE)
     fc$annotation <- read.table(annotationpath,header=TRUE,stringsAsFactors=FALSE)
@@ -641,9 +734,15 @@ write_corrected_counts <- function(idx,samples,bedfile,references) {
     }
     
     gv$log <<- paste0(isolate(gv$log),flog.info("::Finding best reference for %s",outpath))
+    references <- readAllReferences(bedtype)
+    if(length(references)==0) {
+      gv$log <<- paste0(isolate(gv$log),flog.error("Unable to find references.")) 
+      return (NULL)
+    }
+    
     bestReference <- findBestReference(references,df)
     gv$log <<- paste0(isolate(gv$log),flog.info("Writing GC corrected counts: %s",outpath))
-    ftry(write.table(bestReference$corrected,file=outpath,row.names=FALSE,sep="\t",quote = FALSE))
+    ftry(write.table(bestReference$corrected,outpath,row.names=FALSE,sep="\t",quote = FALSE))
     
     # Write out the loess correction across the range of GC values
     bins <- seq(0, 1, by = LOESS_BIN_WIDTH)
@@ -674,6 +773,7 @@ write_corrected_counts <- function(idx,samples,bedfile,references) {
     df_cnb$segments <- bestReference$comparisons$segments
     df_cnb$binSize <- median(df_gc$end - df_gc$start + 1)
     write.table(df_cnb,file = cnb_info_path,row.names=FALSE,sep="\t",quote = FALSE)
+    file_remove_lock(outpath) 
     return(df_cnb)
   }
 }
@@ -693,12 +793,27 @@ write_corrected_counts <- function(idx,samples,bedfile,references) {
 #   value: 10
 # Loop over all combinations of criteria and when there are enough samples, build a reference
 # -------------------------------------------------------------------
-makeAllReferences = function (bedtype) {
-  no_clobber <- as.logical(CFG$no_clobber)
+make_references = function (bedtype = "") {
+  # make reference for aligner - once only
+  if(bedtype == "") {
+    chrom_file <- CFG$chrom_file
+    chrom_index_file <- CFG$chrom_index_file
+    number_of_cores <- CFG$number_of_cores
+    num_index_files <- length(list.files(path = dirname(chrom_index_file), pattern = paste0(basename(chrom_index_file),".*")))
+    if(num_index_files == 0) {
+      gv$log <<- paste0(isolate(gv$log),flog.info("Making index for %s",chrom_file))
+      buildindex(chrom_index_file,chrom_file)
+    } else {
+      gv$log <<- paste0(isolate(gv$log),flog.info("Doing alignment: index file = %s cores = %s",CFG$chrom_index_file,CFG$number_of_cores))
+      gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %d files matching %s.*",num_index_files,chrom_index_file))
+    }
+    return(NULL)    
+  }
+  
+  # make resolution-specific references for others
   bam_type <- BEDTYPE2BAMTYPE[bedtype]
   reference_file_list_file_name <- CFG$reference_file_list
   gc_path <- bedrow2gcrow(BEDFILENAMES[bedtype])$value
-  no_clobber <- as.logical(CFG$no_clobber)
   output_path <- makepath(panel = CFG$panel_path,run = CFG$run_path,filetype = "reference",df_cfg = DF_CFG)
   df_gc <- read.table(gc_path,stringsAsFactors=FALSE,header=TRUE)
   df_reference_file_list <- read.table(reference_file_list_file_name,header = TRUE,stringsAsFactors = FALSE)
@@ -717,7 +832,9 @@ makeAllReferences = function (bedtype) {
   min_reference_samples <- CFG$min_reference_samples
   gv$log <<- paste0(isolate(gv$log),flog.info("Successfully read reference_file_list file: %s with %d samples",
                                              reference_file_list_file_name,num_samples))
-
+  
+  make_deletions_stats(TRUE,df_reference_file_list$CountsPath,bedtype)
+  
   criteria <-  DF_CFG[grepl("params",DF_CFG$section) & grepl("reference_variables",DF_CFG$name),"value"]
   # Parse the reference_variables field
   cs <- strsplit(strsplit(criteria,";")[[1]],"=")
@@ -775,6 +892,9 @@ makeAllReferences = function (bedtype) {
     for (j in criteria_rows) {
       df_row <- df_criteria_col[j,]
       if(df_row$Val!="All") {
+        if(sum(df_row$SampleColumn==colnames(df_reference_file_list))!=1) {
+          gv$log <<- paste0(isolate(gv$log),flog.error("Unable to find the column %s in %s",df_row$SampleColumn,reference_file_list_file_name))
+        }
         if(df_row$isRange) {
           idx_from_criterion <- (df_reference_file_list[,df_row$SampleColumn] >= df_row$Min) & (df_reference_file_list[,df_row$SampleColumn] <= df_row$Max)
         } else {
@@ -793,12 +913,11 @@ makeAllReferences = function (bedtype) {
     
     if(sum(idx) >= as.integer(min_reference_samples)) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Need reference %s with %d samples",reference_file_name,sum(idx)))
-      if((!file.exists(reference_file_path) || no_clobber==FALSE)) {
+      if(!file_no_clobber(reference_file_path) && file_apply_lock(reference_file_path)) {
         gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",reference_file_path))
         makeReference(df_reference_file_list[idx,],reference_file_path,df_gc)
-      } else {
-        gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",reference_file_path))
-      }
+        file_remove_lock(reference_file_path)
+      } 
       ret <- append(ret,"reference_file_name")
       df_files[i,"path"] <- reference_file_path
     }
@@ -1010,12 +1129,12 @@ segments.pval  <- function (x, ngrid = 100, tol = 1e-06, alpha = 0.05, search.ra
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-readAllReferences <- function (bed_type) {
+readAllReferences <- function (bedtype) {
   gv$log <<- paste0(isolate(gv$log),flog.info("Reading references."))
   output_path <- makepath(panel = CFG$panel_path,run = CFG$run_path,filetype = "reference",df_cfg = DF_CFG)
-  pattern <- paste0("^pre_built_ref.*",bed_type,".tsv$")
+  pattern <- paste0("^pre_built_ref.*",bedtype,".tsv$")
   file_list <- list.files(output_path,pattern)
-  ref_names <- gsub("pre_built_ref_","",(gsub(paste0("_",bed_type,".tsv"),"",file_list)))
+  ref_names <- gsub("pre_built_ref_","",(gsub(paste0("_",bedtype,".tsv"),"",file_list)))
   file_paths <- file.path(output_path,file_list)
   refs <- lapply(file_paths,read.table,header=TRUE,stringsAsFactors=FALSE)
   names(refs) <- ref_names
@@ -1039,9 +1158,9 @@ findBestReference <- function (refs,df) {
     cn[i] <- comp[[i]]$comparisons$quantised_cn_diff
     seg[i] <- comp[[i]]$comparisons$segments
   }
-  plot(-log10(sm),-log10(cn))
-  plot(-log10(sm),seg)
-  plot(-log10(cn),seg)
+  # plot(-log10(sm),-log10(cn))
+  # plot(-log10(sm),seg)
+  # plot(-log10(cn),seg)
   df_best <- comp[[which.min(sm)]]
   df_best$refname <- refNames[which.min(sm)]
   # df_best$corrected 
@@ -1061,6 +1180,10 @@ applyReference  <- function (ref_name,refs,df) {
   
   # Median normalise truncated raw counts
   idx <- !is.na(df$raw) & df$raw>=MEDIAN_NORM_CUTOFF & !df$blackListed
+  if(length(idx) * MAX_PROPORTION_ZERO_ENTRIES < sum(df$raw==0)) {
+    gv$log <<- paste0(isolate(gv$log),flog.warn("Failed to apply reference. Too many counts entries are zero. Something is wrong. Entries = %d, Zero Entries = %d, Usable Entries = %d",length(idx),sum(idx),sum(df$raw==0)))
+    return(0)
+  } 
   nc  <-  df$raw / median(df$raw[idx])
   idx <- !is.na(df_reference$ref_median) & df_reference$ref_median>=MEDIAN_NORM_CUTOFF & !df$blackListed 
   nref  <-  df_reference$ref_median / median(df_reference$ref_median[idx])
@@ -1169,32 +1292,34 @@ do_cbc <- function (N,df_reference) {
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-make_bams <- function() {
-  no_clobber <- as.logical(CFG$no_clobber)
+make_bams <- function(sample) {
   chrom_file <- CFG$chrom_file
   chrom_index_file <- CFG$chrom_index_file
   number_of_cores <- CFG$number_of_cores
   num_index_files <- length(list.files(path = dirname(chrom_index_file), pattern = paste0(basename(chrom_index_file),".*")))
   if(num_index_files == 0) {
-    gv$log <<- paste0(isolate(gv$log),flog.info("Making index for %s",chrom_file))
+    gv$log <<- paste0(isolate(gv$log),flog.warning("Making index for %s. This should already have been done.",chrom_file))
     buildindex(chrom_index_file,chrom_file)
   } else {
-    gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s.*",chrom_index_file))
+    gv$log <<- paste0(isolate(gv$log),flog.info("Doing alignment: index file = %s cores = %s",CFG$chrom_index_file,CFG$number_of_cores))
+    gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %d files matching %s.*",num_index_files,chrom_index_file))
   }
-  for (sample in SAMPLES) {
-    bampath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample, filetype = "bam",extension = ".bam",df_cfg = DF_CFG)
-    fastq_dir <- dirname(makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "fastq",extension = ".fastq.gz", df_cfg = DF_CFG))
-    chrom_index_file <- CFG$chrom_index_file
-    if((!file.exists(bampath) || no_clobber==FALSE)) {
-      gv$log <<- paste0(isolate(gv$log),flog.info("Aligning:  %s",bampath))
-      fastqpaths <- list.files(path = fastq_dir,"*fastq.gz",full.names = TRUE)
-      if(length(fastqpaths) != 2) {
-        gv$log <<- paste0(isolate(gv$log),flog.error("Unable to read fastq file matching %s (%d matches)",fastq_dir,length(fastqpaths)))
-        return(FALSE)
-      }
-      cwd <- getwd()
-      chrom_index_file <- file.path(cwd,chrom_index_file)
-      setwd(dirname(bampath))
+  bampath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample, filetype = "bam",extension = ".bam",df_cfg = DF_CFG)
+  fastq_dir <- dirname(makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "fastq",extension = ".fastq.gz", df_cfg = DF_CFG))
+  if(!file_no_clobber(bampath) && file_apply_lock(bampath)) {  
+    gv$log <<- paste0(isolate(gv$log),flog.info("Aligning:  %s",bampath))
+    fastqpaths <- list.files(path = fastq_dir,"*fastq.gz",full.names = TRUE)
+    if(length(fastqpaths) != 2) {
+      gv$log <<- paste0(isolate(gv$log),flog.error("Unable to read fastq file matching %s (%d matches)",fastq_dir,length(fastqpaths)))
+      return (NULL)
+    }
+    cwd <- getwd()
+    chrom_index_file <- ifelse(isAbsolutePath(chrom_index_file),chrom_index_file,file.path(cwd,chrom_index_file))
+    setwd(dirname(bampath))
+    if(SPAWN_EXTERNAL_ALIGNER) {
+      system2('subread-align',c('-i',chrom_index_file,'-r',fastqpaths[1],'-R',fastqpaths[2],'-o',basename(bampath),
+                                '--gzFASTQinput','--BAMoutput','--reportFusions','-T',number_of_cores,'-B',16))
+    } else {
       align(chrom_index_file,
             fastqpaths[1],fastqpaths[2],
             type="dna",
@@ -1202,23 +1327,29 @@ make_bams <- function() {
             output_format="BAM",
             output_file = basename(bampath),
             nthreads = number_of_cores,
+            indels = 2,
+            unique = FALSE,
+            nBestLocations = 16,
             detectSV=TRUE
-            )
-      lapply(c("fixbam","sam","tmp","bin"), remove_files_by_suffix)
-      setwd(cwd)
-    } else {
-      gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",bampath))
+      )
     }
+    lapply(c("fixbam","sam","tmp","bin"), remove_files_by_suffix)
+    file_remove_lock(bampath)
+    setwd(cwd)
+    return (NULL)
+  } else {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",bampath))
+    return (NULL)
   }
+  return (NULL)
 }
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-make_vcfs <- function() {
-  no_clobber <- as.logical(CFG$no_clobber)
+make_vcfs <- function(sample) {
   number_of_cores <- as.integer(CFG$number_of_cores)
   df_files <- data.frame(
-    sample = SAMPLES,
+    sample = sample,
     path = "",
     file = "vcf",
     resolution = VCF_SECTION,
@@ -1226,106 +1357,101 @@ make_vcfs <- function() {
     is_wgs = (VCF_SECTION=="targeted"),
     stringsAsFactors = FALSE
     )
-  for (sample in SAMPLES) {
-    bampath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "bam",extension = ".bam",df_cfg = DF_CFG)
-    vcfpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "vcf", extension = ".vcf",df_cfg = DF_CFG)
-    vcffile <- basename(vcfpath)
-    bamfile <- basename(bampath)
-    sample_idx <- grepl(sample,df_files$sample)
-    df_files[sample_idx,"path"] <- vcfpath
-    refGenomeFile <- CFG$chrom_file
-    snp_annotation_file <- CFG$snp_annotation_file
-    if((!file.exists(vcfpath) || no_clobber==FALSE)) {
-      gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",vcfpath))
-      cwd <- getwd()
-      bampath <- file.path(cwd,bampath)
-      vcfpath <- file.path(cwd,vcfpath)
-      refGenomeFile <- file.path(cwd,refGenomeFile)
-      snp_annotation_file <- file.path(cwd,snp_annotation_file)
-      setwd(dirname(bampath))
-      exactSNP(bamfile,
-               isBAM=TRUE,
-               refGenomeFile=refGenomeFile,
-               SNPAnnotationFile=snp_annotation_file, 
-               outputFile=vcffile,
-               # qvalueCutoff=12,
-               # minAllelicFraction=0,
-               minAllelicBases=SNP_MIN_MISMATCHES,
-               minReads=SNP_MIN_READS,
-               maxReads=SNP_MAX_READS,
-               # minBaseQuality=13,
-               # nTrimmedBases=3,
-               nthreads=number_of_cores)
-      gv$log <<- paste0(isolate(gv$log),flog.info("Copying %s to %s",vcffile,vcfpath))
-      file.copy(from = vcffile, to = vcfpath)
-      # file.remove(vcffile)
-      lapply(c("fixbam","sam","tmp","bin"), remove_files_by_suffix)
-      setwd(cwd)
-    } else {
-      gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",vcfpath))
-    }
+  bampath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "bam",extension = ".bam",df_cfg = DF_CFG)
+  vcfpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "vcf", extension = ".vcf",df_cfg = DF_CFG)
+  vcffile <- basename(vcfpath)
+  bamfile <- basename(bampath)
+  sample_idx <- grepl(sample,df_files$sample)
+  df_files[sample_idx,"path"] <- vcfpath
+  refGenomeFile <- CFG$chrom_file
+  snp_annotation_file <- CFG$snp_annotation_file
+  if(!file_no_clobber(vcfpath) && file_apply_lock(vcfpath)) {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",vcfpath))
+    cwd <- getwd()
+    bampath <- ifelse(isAbsolutePath(bampath),bampath,file.path(cwd,bampath))
+    vcfpath <- ifelse(isAbsolutePath(vcfpath),vcfpath,file.path(cwd,vcfpath))
+    refGenomeFile <- ifelse(isAbsolutePath(refGenomeFile),refGenomeFile,file.path(cwd,refGenomeFile))
+    snp_annotation_file <- ifelse(isAbsolutePath(snp_annotation_file),snp_annotation_file,file.path(cwd,snp_annotation_file))
+    setwd(dirname(bampath))
+    exactSNP(bamfile,
+             isBAM=TRUE,
+             refGenomeFile=refGenomeFile,
+             SNPAnnotationFile=snp_annotation_file, 
+             outputFile=vcffile,
+             # qvalueCutoff=12,
+             # minAllelicFraction=0,
+             minAllelicBases=SNP_MIN_MISMATCHES,
+             minReads=SNP_MIN_READS,
+             maxReads=SNP_MAX_READS,
+             # minBaseQuality=13,
+             # nTrimmedBases=3,
+             nthreads=number_of_cores)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Copying %s to %s",vcffile,vcfpath))
+    file.copy(from = vcffile, to = vcfpath)
+    # file.remove(vcffile)
+    lapply(c("fixbam","sam","tmp","bin"), remove_files_by_suffix)
+    file_remove_lock(vcfpath)
+    setwd(cwd)
+  } else {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",vcfpath))
   }
   return(df_files)
 }
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-make_bafs <- function() {
-  no_clobber <- as.logical(CFG$no_clobber)
+make_bafs <- function(sample) {
   df_files <- data.frame(
-    sample = SAMPLES,
-    path = "",
-    file = "baf",
-    resolution = BAF_SECTION,
-    is_targeted = (BAF_SECTION=="targeted"),
-    is_wgs = (BAF_SECTION=="targeted"),
-    stringsAsFactors = FALSE
-    )
+  sample = sample,
+  path = "",
+  file = "baf",
+  resolution = BAF_SECTION,
+  is_targeted = (BAF_SECTION=="targeted"),
+  is_wgs = (BAF_SECTION=="targeted"),
+  stringsAsFactors = FALSE
+  )
+  sample_idx <- grepl(sample,df_files$sample)
+  bafpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "baf",extension = "_baf.tsv",df_cfg = DF_CFG)
+  baffile <- basename(bafpath)
+  vcfpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "vcf",extension = ".vcf",df_cfg = DF_CFG)
+  vcffile <- basename(vcfpath)
+  df_files[sample_idx,"path"] <- bafpath
   
-  for (sample in SAMPLES) {
-    sample_idx <- grepl(sample,df_files$sample)
-    bafpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "baf",extension = "_baf.tsv",df_cfg = DF_CFG)
-    baffile <- basename(bafpath)
-    vcfpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "vcf",extension = ".vcf",df_cfg = DF_CFG)
-    vcffile <- basename(vcfpath)
-    df_files[sample_idx,"path"] <- bafpath
-    
-    if((!file.exists(bafpath) || no_clobber==FALSE)) {
-      vcf <- readVcf(vcfpath,genome = "hg19")
-      if(nrow(vcf)>0) {
-        idx <- isSNV(vcf, singleAltOnly=FALSE)
-        snvinfo <- info(vcf[idx])
-        df_baf <- data.frame(chr = paste0("chr",t(as.data.frame(strsplit(rownames(snvinfo),":")))[,1]), 
-                             start = start(ranges(rowRanges(vcf[idx]))), 
-                             end = end(ranges(rowRanges(vcf[idx]))), 
-                             freq = as.double(snvinfo$MM)/as.double(snvinfo$DP), 
-                             ref_reads = as.double(snvinfo$DP), 
-                             alt_reads = as.double(snvinfo$MM),
-                             stringsAsFactors = FALSE)
-      }
-      else {
-        gv$log <<- paste0(isolate(gv$log),flog.warn("Empty VCF file. Writing a fake row."))    
-        df_baf <- data.frame(chr = "MT", start = 1, end = 1, freq = 0, ref_reads = 0, alt_reads = 0,stringsAsFactors = FALSE)   
-      }        
-      idx <- grepl("GL",df_baf$chr) | grepl("MT",df_baf$chr) | df_baf$alt_reads >= SNP_MAX_READS | df_baf$ref_reads >= SNP_MAX_READS 
-      df_baf <- df_baf[!idx,]
-      gv$log <<- paste0(isolate(gv$log),flog.info("Writing %s with %d entries",bafpath,sum(idx)))    
-      write.table(df_baf,bafpath,row.names=FALSE,quote = FALSE,sep="\t")
-    } else {
-      gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",bafpath))
+  if(!file_no_clobber(bafpath) && file_apply_lock(bafpath)) {
+    vcf <- readVcf(vcfpath,genome = "hg19")
+    if(nrow(vcf)>0) {
+      idx <- isSNV(vcf, singleAltOnly=FALSE)
+      snvinfo <- info(vcf[idx])
+      df_baf <- data.frame(chr = paste0("chr",t(as.data.frame(strsplit(rownames(snvinfo),":")))[,1]), 
+                           start = start(ranges(rowRanges(vcf[idx]))), 
+                           end = end(ranges(rowRanges(vcf[idx]))), 
+                           freq = as.double(snvinfo$MM)/as.double(snvinfo$DP), 
+                           ref_reads = as.double(snvinfo$DP), 
+                           alt_reads = as.double(snvinfo$MM),
+                           stringsAsFactors = FALSE)
     }
+    else {
+      gv$log <<- paste0(isolate(gv$log),flog.warn("Empty VCF file. Writing a fake row."))    
+      df_baf <- data.frame(chr = "MT", start = 1, end = 1, freq = 0, ref_reads = 0, alt_reads = 0,stringsAsFactors = FALSE)   
+    }        
+    idx <- grepl("GL",df_baf$chr) | grepl("MT",df_baf$chr) | df_baf$alt_reads >= SNP_MAX_READS | df_baf$ref_reads >= SNP_MAX_READS 
+    df_baf <- df_baf[!idx,]
+    gv$log <<- paste0(isolate(gv$log),flog.info("Writing %s with %d entries",bafpath,sum(idx)))    
+    write.table(df_baf,bafpath,row.names=FALSE,quote = FALSE,sep="\t")
+    file_remove_lock(bafpath)
+  } else {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",bafpath))
   }
   return(df_files)
 }
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-make_deletions <- function() {
+make_deletions <- function(sample) {
   whitelist_path = CFG$common_deletion_list
-  no_clobber <- as.logical(CFG$no_clobber)
   df_whitelist <- read.table(whitelist_path,header=TRUE,stringsAsFactors=FALSE)
   df_files <- data.frame(
-    sample = SAMPLES,
+    sample = sample,
     path = "",
     file = "deletions",
     resolution = DEL_SECTION,
@@ -1334,83 +1460,83 @@ make_deletions <- function() {
     stringsAsFactors = FALSE
   )
   
-  for (sample in SAMPLES) {
-    sample_idx <- grepl(sample,df_files$sample)
-    delpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "sv",resolution = DEL_SECTION, extension = "_del.tsv",df_cfg = DF_CFG)
-    delfile <- basename(delpath)
-    corrected_counts_path <- makepath(panel = CFG$panel,run = CFG$run_path,sample = sample,filetype = "cnv",resolution = DEL_SECTION, extension = ".tsv",df_cfg = DF_CFG)
-    df_files[sample_idx,"path"] <- delpath
-    if((!file.exists(delpath) || no_clobber==FALSE)) {
-      gv$log <<- paste0(isolate(gv$log),flog.info("Need: %s",delpath))
-      df_counts <- read.table(corrected_counts_path,header=TRUE,stringsAsFactors=FALSE)
-      gv$log <<- paste0(isolate(gv$log),flog.info("Have %s with %d rows",corrected_counts_path,nrow(df_counts)))
-      cbc_list <- do_cbc(df_counts$N,df_counts)
-      df_del <- cbc_list$df_seg
-      gv$log <<- paste0(isolate(gv$log),flog.info("Found %d segments",nrow(df_del)))     
-      df_del$whiteListed <- FALSE
-      df_del$Arm <- ""
-      df_del$N <- 2^df_del$log2N
-      df_del$weighted_mean <- 0
-      df_del$weighted_var <- 0
-      df_del$weighted_sem <- 0
-      idx_ok <- !is.na(df_counts$ref_mad) & 
-        !is.na(df_counts$ref_median) & 
-        df_counts$ref_mad!=0 & 
-        df_counts$ref_median!=0 & 
-        df_counts$blackListed==FALSE
-      
-      for (n in 1:nrow(df_del)) {
-        row <- df_del[n,]
-        idx_counts <- df_counts$start >= row$Start &
-          df_counts$end <= row$End &
-          df_counts$chr == row$Chr & 
-          idx_ok
-        numCounts <- sum(idx_counts)
-        if(numCounts > 1) {
-          weights <- 1 / (df_counts$ref_mad[idx_counts])
-          counts <- df_counts$N[idx_counts]
-          weights <- weights / sum(weights) # normalise
-          df_del$weighted_mean[n] <- sum(counts * weights,na.rm=TRUE)
-          df_del$weighted_var[n] <- weighted.var (counts,weights,na.rm=TRUE)
-          df_del$weighted_sem[n] <- weighted.var.se(counts,weights,na.rm=TRUE)
-          # If the pval is NA then it's a whole-chromosome event. If other stuff is NA, it's dodgy.
-          if(!(is.na(row$pval) || is.na(df_del$weighted_mean[n]) || is.na(df_del$weighted_sem[n]))) {
-            if(!is.na(row$pval) || (df_del$weighted_mean[n] - 2)^2 > 3 * df_del$weighted_sem[n]) {
-              idx <- row$Chr == df_whitelist$Chr &
-                row$Start >= df_whitelist$Start &
-                row$End <= df_whitelist$End &
-                0 != df_whitelist$GainLoss
-              # row$Start <= df_whitelist$RequiredStart &
-              # row$End >= df_whitelist$RequiredEnd &
-              # "pq" != df_whitelist$Arm) $
-              if(sum(idx)==1) {
-                df_del$whiteListed[n] <- TRUE
-                df_del$Arm[n] <- df_whitelist$Arm[idx][1]
-                df_del$Gene[n] <- df_whitelist$Gene[idx][1]
-                gain_loss <- ifelse(df_whitelist$GainLoss[idx][1]>0,"duplication","deletion")
-                gv$log <<- paste0(isolate(gv$log),
-                                  flog.info("Found whitelisted entry: %s%s",
-                                            row$Chr,df_del$Arm[n]))
-              }
+
+  sample_idx <- grepl(sample,df_files$sample)
+  delpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "sv",resolution = DEL_SECTION, extension = "_del.tsv",df_cfg = DF_CFG)
+  delfile <- basename(delpath)
+  corrected_counts_path <- makepath(panel = CFG$panel,run = CFG$run_path,sample = sample,filetype = "cnv",resolution = DEL_SECTION, extension = ".tsv",df_cfg = DF_CFG)
+  df_files[sample_idx,"path"] <- delpath
+  if(!file_no_clobber(delpath) && file_apply_lock(delpath)) {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Need: %s",delpath))
+    df_counts <- read.table(corrected_counts_path,header=TRUE,stringsAsFactors=FALSE)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Have %s with %d rows",corrected_counts_path,nrow(df_counts)))
+    cbc_list <- do_cbc(df_counts$N,df_counts)
+    df_del <- cbc_list$df_seg
+    gv$log <<- paste0(isolate(gv$log),flog.info("Found %d segments",nrow(df_del)))     
+    df_del$whiteListed <- FALSE
+    df_del$Arm <- ""
+    df_del$N <- 2^df_del$log2N
+    df_del$weighted_mean <- 0
+    df_del$weighted_var <- 0
+    df_del$weighted_sem <- 0
+    idx_ok <- !is.na(df_counts$ref_mad) & 
+      !is.na(df_counts$ref_median) & 
+      df_counts$ref_mad!=0 & 
+      df_counts$ref_median!=0 & 
+      df_counts$blackListed==FALSE
+    
+    for (n in 1:nrow(df_del)) {
+      row <- df_del[n,]
+      idx_counts <- df_counts$start >= row$Start &
+        df_counts$end <= row$End &
+        df_counts$chr == row$Chr & 
+        idx_ok
+      numCounts <- sum(idx_counts)
+      if(numCounts > 1) {
+        weights <- 1 / (df_counts$ref_mad[idx_counts])
+        counts <- df_counts$N[idx_counts]
+        weights <- weights / sum(weights) # normalise
+        df_del$weighted_mean[n] <- sum(counts * weights,na.rm=TRUE)
+        df_del$weighted_var[n] <- weighted.var (counts,weights,na.rm=TRUE)
+        df_del$weighted_sem[n] <- weighted.var.se(counts,weights,na.rm=TRUE)
+        # If the pval is NA then it's a whole-chromosome event. If other stuff is NA, it's dodgy.
+        if(!(is.na(row$pval) || is.na(df_del$weighted_mean[n]) || is.na(df_del$weighted_sem[n]))) {
+          if(!is.na(row$pval) || (df_del$weighted_mean[n] - 2)^2 > 3 * df_del$weighted_sem[n]) {
+            idx <- row$Chr == df_whitelist$Chr &
+              row$Start >= df_whitelist$Start &
+              row$End <= df_whitelist$End &
+              0 != df_whitelist$GainLoss
+            # row$Start <= df_whitelist$RequiredStart &
+            # row$End >= df_whitelist$RequiredEnd &
+            # "pq" != df_whitelist$Arm) $
+            if(sum(idx)==1) {
+              df_del$whiteListed[n] <- TRUE
+              df_del$Arm[n] <- df_whitelist$Arm[idx][1]
+              df_del$Gene[n] <- df_whitelist$Gene[idx][1]
+              gain_loss <- ifelse(df_whitelist$GainLoss[idx][1]>0,"duplication","deletion")
+              gv$log <<- paste0(isolate(gv$log),
+                                flog.info("Found whitelisted entry: %s%s",
+                                          row$Chr,df_del$Arm[n]))
             }
-          } # if not dodgy
-          else {
-            gv$log <<- paste0(isolate(gv$log),flog.warn("Segmentation stats look odd in make_deletions(): Entry # %ds",n)) 
           }
+        } # if not dodgy
+        else {
+          gv$log <<- paste0(isolate(gv$log),flog.warn("Segmentation stats look odd in make_deletions(): Entry # %ds",n)) 
         }
-      } # for
-      gv$log <<- paste0(isolate(gv$log),flog.info("Writing %s with %d entries",delpath,nrow(df_del)))    
-      # df_del <- df_del[df_del$whiteListed,]
-      # df_del$whiteListed <- NULL
-      colnames(df_del)[colnames(df_del)=="Chr"] <- "chr"
-      colnames(df_del)[colnames(df_del)=="Start"] <- "start"
-      colnames(df_del)[colnames(df_del)=="End"] <- "end"
-      colnames(df_del)[colnames(df_del)=="Bins"] <- "bins"
-      colnames(df_del)[colnames(df_del)=="Gene"] <- "gene"
-      write.table(df_del,delpath,row.names=FALSE,quote = FALSE,sep="\t")
-    } else {
-      gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",delpath))
-    }
+      }
+    } # for
+    gv$log <<- paste0(isolate(gv$log),flog.info("Writing %s with %d entries",delpath,nrow(df_del)))    
+    # df_del <- df_del[df_del$whiteListed,]
+    # df_del$whiteListed <- NULL
+    colnames(df_del)[colnames(df_del)=="Chr"] <- "chr"
+    colnames(df_del)[colnames(df_del)=="Start"] <- "start"
+    colnames(df_del)[colnames(df_del)=="End"] <- "end"
+    colnames(df_del)[colnames(df_del)=="Bins"] <- "bins"
+    colnames(df_del)[colnames(df_del)=="Gene"] <- "gene"
+    write.table(df_del,delpath,row.names=FALSE,quote = FALSE,sep="\t")
+    file_remove_lock(delpath)
+  } else {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",delpath))
   }
   return(df_files)
 }
@@ -1443,36 +1569,15 @@ weighted.var <- function(x, w, na.rm = FALSE) {
 }
 # -------------------------------------------------------------------
 
-# -------------------------------------------------------------------
-# Not doing this for the moment
-make_deletion_backgrounds_distributions <- function(ref_cn_tables) {
-  # nbins from counts
-  # permutations = nbins * factorial(nreference) or nbins * nreference
-  # df_pr_null <- matrix(data = 0, nrow = permutations,ncol = 45,dimnames = c("breakpoint","Chr_Dir"),colnames = -22-22)
-  # Loop over chromosomes, directions, replicates and breakpoints
-  # Compute FET for each breakpoint
-  # Does it vary for chromosome?
-  # Does it vary for position?
-  # Does it vary for resolution?
-  # When you include true positives what does the clustering say?
-  # Look at statistic in CBC paper
-}
-# -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-find_putative_deletions <- function(start, end, cn_table, ref_cn_tables) {
-  df_pr <- matrix(data = 0, nrow = nbins,ncol = 45,dimnames = c("breakpoint","Chr_Dir"),colnames = -22:22)  
-}
-# -------------------------------------------------------------------
-
-# -------------------------------------------------------------------
-make_translocations <- function() {
+make_translocations <- function(sample) {
   #Chr  Location	Chr	Location	SameStrand	nSupport  
   # 12M1411.bam.breakpoints.txt 
   # 12M1411.bam.fusion.txt
   # ID  Partner	Gene	Chr	Arm	Band	Start	End	Strand	MinSupport
   df_files <- data.frame(
-    sample = SAMPLES,
+    sample = sample,
     path = "",
     file = "fusion",
     resolution = FUSION_SECTION,
@@ -1480,73 +1585,73 @@ make_translocations <- function() {
     is_wgs = (FUSION_SECTION=="targeted"),
     stringsAsFactors = FALSE
   )
-  no_clobber <- as.logical(CFG$no_clobber)
   fusions_white_list <- CFG$fusions_white_list
   df_whitelist <- read.table(fusions_white_list,header=TRUE,stringsAsFactors=FALSE)
   df_whitelist$Chr <- sub("^chr","",df_whitelist$Chr)
   
-  for (sample in SAMPLES) {
-    bampath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "bam",extension = ".bam",df_cfg = DF_CFG)
-    fusions_path <- makepath(panel = CFG$panel,run = CFG$run_path,sample = sample,filetype = "sv",extension = "_fusions.tsv",df_cfg = DF_CFG)
-    putative_fusion_list <- sub(".bam$",".bam.fusion.txt",bampath)
-    sample_idx <- grepl(sample,df_files$sample)
-    df_files[sample_idx,"path"] <- fusions_path
+  bampath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "bam",extension = ".bam",df_cfg = DF_CFG)
+  fusions_path <- makepath(panel = CFG$panel,run = CFG$run_path,sample = sample,filetype = "sv",extension = "_fusions.tsv",df_cfg = DF_CFG)
+  # putative_fusion_list <- sub(".bam$",".bam.fusion.txt",bampath)
+  putative_fusion_list <- sub(".bam$",".bam.breakpoints.txt",bampath)
+  sample_idx <- grepl(sample,df_files$sample)
+  df_files[sample_idx,"path"] <- fusions_path
 
-    if(!file.exists(fusions_path) || no_clobber==FALSE) {
-      if(file.exists(putative_fusion_list)) {
-        gv$log <<- paste0(isolate(gv$log),flog.info("Reading %s",putative_fusion_list))
-        df_putative_fusions <- read.table(putative_fusion_list,header=TRUE,stringsAsFactors=FALSE)
-        gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",fusions_path))
-        colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",	"end",	"sameStrand",	"nSupport")
-        rownames(df_putative_fusions) <- df_putative_fusions$ID
-        df_putative_fusions$idx1 <- 0
-        df_putative_fusions$idx2 <- 0
-        df_putative_fusions$whiteListed <- FALSE
-        df_putative_fusions$name <- ""
-        for (n in 1:nrow(df_putative_fusions)) {
-          putative_fusion <- df_putative_fusions[n,]
-          idx1 <- (putative_fusion$chr == df_whitelist$Chr & 
-                     putative_fusion$start >= df_whitelist$Start & 
-                     putative_fusion$start <= df_whitelist$End & 
-                     putative_fusion$nSupport >= df_whitelist$MinSupport)
-          idx2 <- (putative_fusion$chr2 == df_whitelist$Chr & 
-                        putative_fusion$end >= df_whitelist$Start & 
-                        putative_fusion$end <= df_whitelist$End & 
-                        putative_fusion$nSupport >= df_whitelist$MinSupport)
-          t1 <-which(idx1)[1] 
-          t2 <-which(idx2)[1] 
-          # df_putative_fusions[n,"start"] <- ifelse(sum(idx1)>0,t1,0)
-          # df_putative_fusions[n,"end"] <- ifelse(sum(idx2)>0,t2,0)
-          if( sum(idx1) > 0 && sum(idx2) > 0 ) {
-            partners <- as.vector(df_whitelist[t1,"ID"])
-            if(sum(partners == as.vector(df_whitelist[t2,"ID"]))) {
-              df_putative_fusions[n,"whiteListed"] <- TRUE
-              df_putative_fusions[n,"name"] <- paste0(
-                "t(",
-                  putative_fusion$chr,";",putative_fusion$chr2,
-                ") ",
-                "(",
-                  df_whitelist[t1,"Arm"],df_whitelist[t1,"Band"],";",
-                  df_whitelist[t2,"Arm"],df_whitelist[t2,"Band"],
-                ") ",
-                df_whitelist[t1,"Arm"],df_whitelist[t1,"Gene"]," / ",
-                df_whitelist[t2,"Arm"],df_whitelist[t2,"Gene"]
-              ) # paste
-            }
+  if(!file_no_clobber(fusions_path) && file_apply_lock(fusions_path)) {
+    if(file.exists(putative_fusion_list)) {
+      gv$log <<- paste0(isolate(gv$log),flog.info("Reading %s",putative_fusion_list))
+      df_putative_fusions <- read.table(putative_fusion_list,header=TRUE,stringsAsFactors=FALSE)
+      gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",fusions_path))
+      # colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",  "end",	"sameStrand",	"nSupport")
+      colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",  "end",	"sameStrand",	"nSupport","BreakPoint1_GoUp","BreakPoint2_GoUp")
+      rownames(df_putative_fusions) <- df_putative_fusions$ID
+      df_putative_fusions$idx1 <- 0
+      df_putative_fusions$idx2 <- 0
+      df_putative_fusions$whiteListed <- FALSE
+      df_putative_fusions$name <- ""
+      for (n in 1:nrow(df_putative_fusions)) {
+        putative_fusion <- df_putative_fusions[n,]
+        idx1 <- (putative_fusion$chr == df_whitelist$Chr & 
+                   putative_fusion$start >= df_whitelist$Start & 
+                   putative_fusion$start <= df_whitelist$End & 
+                   putative_fusion$nSupport >= df_whitelist$MinSupport)
+        idx2 <- (putative_fusion$chr2 == df_whitelist$Chr & 
+                      putative_fusion$end >= df_whitelist$Start & 
+                      putative_fusion$end <= df_whitelist$End & 
+                      putative_fusion$nSupport >= df_whitelist$MinSupport)
+        t1 <-which(idx1)[1] 
+        t2 <-which(idx2)[1] 
+        # df_putative_fusions[n,"start"] <- ifelse(sum(idx1)>0,t1,0)
+        # df_putative_fusions[n,"end"] <- ifelse(sum(idx2)>0,t2,0)
+        if( sum(idx1) > 0 && sum(idx2) > 0 ) {
+          partners <- as.vector(df_whitelist[t1,"ID"])
+          if(sum(partners == as.vector(df_whitelist[t2,"ID"]))) {
+            df_putative_fusions[n,"whiteListed"] <- TRUE
+            df_putative_fusions[n,"name"] <- paste0(
+              "t(",
+                putative_fusion$chr,";",putative_fusion$chr2,
+              ") ",
+              "(",
+                df_whitelist[t1,"Arm"],df_whitelist[t1,"Band"],";",
+                df_whitelist[t2,"Arm"],df_whitelist[t2,"Band"],
+              ") ",
+              df_whitelist[t1,"Arm"],df_whitelist[t1,"Gene"]," / ",
+              df_whitelist[t2,"Arm"],df_whitelist[t2,"Gene"]
+            ) # paste
           }
-        } #for
-        # df_fusions <- df_putative_fusions[df_putative_fusions$WhiteListed,]
-        df_fusions <- df_putative_fusions
-        if(sum(grepl("^chr",df_fusions$chr)) ==0) { df_fusions$chr  <- paste0("chr",df_fusions$chr ) }
-        if(sum(grepl("^chr",df_fusions$chr2))==0) { df_fusions$chr2 <- paste0("chr",df_fusions$chr2) }
-        write.table(df_fusions,fusions_path,row.names=FALSE,col.names=TRUE,quote = FALSE,sep="\t")
-      } else {
-        gv$log <<- paste0(isolate(gv$log),flog.warn("Can't find: %s. Need to run gridss or Rsubread::Align().",putative_fusion_list))
-      }
+        }
+      } #for
+      # df_fusions <- df_putative_fusions[df_putative_fusions$WhiteListed,]
+      df_fusions <- df_putative_fusions
+      if(sum(grepl("^chr",df_fusions$chr)) ==0) { df_fusions$chr  <- paste0("chr",df_fusions$chr ) }
+      if(sum(grepl("^chr",df_fusions$chr2))==0) { df_fusions$chr2 <- paste0("chr",df_fusions$chr2) }
+      write.table(df_fusions,fusions_path,row.names=FALSE,col.names=TRUE,quote = FALSE,sep="\t")
+      file_remove_lock(fusions_path)
     } else {
-      gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",fusions_path))
+      gv$log <<- paste0(isolate(gv$log),flog.warn("Can't find: %s. Need to run gridss or Rsubread::Align().",putative_fusion_list))
     }
-  } # for
+  } else {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",fusions_path))
+  }
   return(df_files)
 }
 # -------------------------------------------------------------------
@@ -1556,15 +1661,15 @@ make_bins <- function(bedtype) {
   bin_size <- BINSIZES[bedtype]
   bedfile <- CFG[[BEDFILENAMES[bedtype]]]
   chrom_info_file <- CFG$chrom_info_file
-  no_clobber <- as.logical(CFG$no_clobber)
   
   if(is.na(bedfile) || length(bedfile)<1) {
     gv$log <<- paste0(isolate(gv$log),flog.warn("Skipping bedfile for bin size %d",bin_size))  
-    df <- data.frame(chr = character(0), start = integer(0), end = integer(0),id = integer(0), score = integer(0), strand = character(0))
-    return(df)
+    #df <- data.frame(chr = character(0), start = integer(0), end = integer(0),id = integer(0), score = integer(0), strand = character(0))
+    #return(df)
+    return(NULL)
   }
   destfile <- bedfile
-  if((!file.exists(destfile) || no_clobber==FALSE)) {
+  if(!file_no_clobber(destfile) && file_apply_lock(destfile)) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Reading: %s",chrom_info_file))
     chromInfo <- read.table(chrom_info_file,stringsAsFactors=FALSE)
     colnames(chromInfo) <- c("chr","end","file")
@@ -1586,19 +1691,20 @@ make_bins <- function(bedtype) {
     df_intervals <-  do.call("rbind",lapply(chr_names,make_intervals,chromInfo))
     options(scipen=20)
     ftry(write.table(df_intervals,destfile,col.names=FALSE,row.names=FALSE,quote = FALSE,sep="\t"))
+    file_remove_lock(destfile)
     gv$log <<- paste0(isolate(gv$log),flog.info("Making bins for %s: Done",destfile))    
   }
   gv$log <<- paste0(isolate(gv$log),flog.info("Have: %s",destfile))
+  return(NULL)
 }
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-make_gc <- function(bedtype) {
+make_gc_tables <- function(bedtype) {
   chrom_file <- CFG$chrom_file
-  no_clobber <- as.logical(CFG$no_clobber)
   destfile <- CFG[[BEDFILENAMES[bedtype]]]
   
-  if((!file.exists(destfile) || no_clobber==FALSE)) {
+  if(!file_no_clobber(destfile) && file_apply_lock(destfile)) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Making GC corrections. Reading: %s",bedfile))
     intervals <- import.bed(bedfile)
     gv$log <<- paste0(isolate(gv$log),flog.info("Making GC corrections. Reading: %s",chrom_file))
@@ -1630,15 +1736,17 @@ make_gc <- function(bedtype) {
     }
     colnames(df_gc) <- c("chr","start","end","gc")
     write.table(df_gc,destfile,row.names=FALSE,quote = FALSE,sep="\t")
+    file_remove_lock(destfile)
     gv$log <<- paste0(isolate(gv$log),flog.info("Making GC content for %s: Done",destfile))  
-    return(df_gc)
+    return(NULL)
   }
   gv$log <<- paste0(isolate(gv$log),flog.info("Have: %s",destfile))
+  return(NULL)
 }
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-make_all_gc_plots <- function(output_path) {
+make_gc_plots <- function(output_path) {
   suffixes <- c("_targeted.tsv","_off_target.tsv","_medium.tsv","_coarse.tsv","_fine.tsv")
   filelist <- unlist(lapply(suffixes,function(x) { dir(output_path,pattern=x) }))
   lapply(file.path(output_path,filelist),make_gc_plot)
@@ -1686,45 +1794,11 @@ make_gc_plot <- function(gc_file) {
     geom_line(data = loessCorrection_df, aes(x = gc, y = cor,size=1,colour="red")) + 
     geom_line(data = loessCorrection_df, aes(x = gc, y = median,size=1,colour="blue")) + 
     guides(colour = "none", size = "none") 
-  p
+  
   ggsave(filename=plot_file, plot=p)
 }
 # -------------------------------------------------------------------
 
-# -------------------------------------------------------------------
-read_counts_table <- function(filename) {
-  pq_boundary <- list (chr1 = 125000000, chr10 =  40200000,  chr11 =	53700000,  chr12 =	35800000,  chr13 =	17900000,  chr14 =	17600000,  chr15 =	19000000,  chr16 =	36600000,  chr17 =	24000000,  chr18 =	17200000,  chr19 =	26500000,  chr2 =	93300000,  chr20 =	27500000,  chr21 =	13200000,  chr22 =	14700000,  chr3 =	91000000,  chr4 =	50400000,  chr5 =	48400000,  chr6 =	61000000,  chr7 =	59900000,  chr8 =	45600000,  chr9 =	49000000,  chrX =	60600000,  chrY =	12500000)
-  df_roi <- rbind(
-    data.frame(name = "TP53", chr = "chr17", start = 7571720, end = 7590868),
-    data.frame(name = "ATM", chr = "chr11", start = 108093559, end = 108239826),
-    data.frame(name = "BIRC3", chr = "chr11", start = 102188181, end = 102210135),
-    data.frame(name = "DLEU2", chr = "chr13", start = 50556688, end = 50699677),
-    data.frame(name = "RB1", chr = "chr13", start = 48877883, end = 49056026)
-  )
-  rownames(df_roi) <- df_roi$name
-  print(paste0("Reading ",filename))
-  df <- read.table(filename,header=TRUE,stringsAsFactors=FALSE,sep = '\t')
-  colnames(df) <- "raw"
-  chr_off <- t(matrix(unlist(strsplit(rownames(df),":")),nrow=2,ncol=nrow(df)))
-  off <- t(matrix(unlist(strsplit(chr_off[,2],"-")),nrow=2,ncol=nrow(df)))
-  df$chr <- chr_off[,1]
-  df$start <- off[,1]
-  df$end <- off[,2]
-  s <- sub(".*cnv/","",filename)
-  s <- sub("_.*tsv","",s)
-  df$filename <- filename
-  df$sample <- s
-  df$run <- gsub("/.*$","",gsub("^.*/160","160",gsub("^.*/161","161",filename)))
-  df$goi <- "NA"
-  df$idx_noise_cutoff <- TRUE
-  df$arm <- ifelse(df$start < pq_boundary[df$chr],"p","q")
-  for (goi in rownames(df_roi)) {
-    idx <- df$chr == df_roi[goi,"chr"] & df$end <= df_roi[goi,"end"] & df$start >= df_roi[goi,"start"] 
-    df$goi[idx] <- goi
-  }
-  return(df)
-}
-# -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
 read_segmentation_table <- function (filename) {
@@ -1773,110 +1847,87 @@ read_segmentation_table <- function (filename) {
 }
 # -------------------------------------------------------------------
   
+
 # -------------------------------------------------------------------
-make_all_deletions_stats <- function () {
-  #   pattern <- "*medium_del.tsv"
-  # pattern <- "*_targeted_fc_counts.tsv"
-  # filelist <- grep("160..._NS.*[0-9]_targeted",dir("./PanHaem_v1.1/",pattern = pattern, recursive = TRUE,full.names = TRUE),value=TRUE)
-  # df_samples <- do.call(rbind, lapply(filelist,read_counts_table))  
-  df_reference_file_list <- read.table(CFG$reference_file_list,header = TRUE,stringsAsFactors = FALSE)  
-  df_reference_file_list <- df_reference_file_list[df_reference_file_list$Date < 161212 & 
-                                                     df_reference_file_list$SampleName != "16K1449" & 
-                                                     df_reference_file_list$PanelName == "PanHaem" ,]
-  df_reference_file_list$CountsPath <- makepath(panel = CFG$panel_path,
-                                                run = df_reference_file_list$RunName,
-                                                sample = df_reference_file_list$SampleName,
-                                                filetype = "cnv",
-                                                resolution = "targeted",
-                                                extension = "_fc_counts.tsv",
-                                                df_cfg = DF_CFG
-  )
-  df_reference_file_list$DeletionsPath <- makepath(panel = CFG$panel_path,
-                                                run = df_reference_file_list$RunName,
-                                                sample = df_reference_file_list$SampleName,
-                                                filetype = "sv",
-                                                resolution = DEL_SECTION,
-                                                extension = "_del.tsv",
-                                                df_cfg = DF_CFG
-  )
-  df_seg <- do.call(rbind, lapply(df_reference_file_list$DeletionsPath,read_segmentation_table))  
-  write.table(df_seg,"seg_summary.tsv",row.names=FALSE,sep="\t",quote = FALSE)
-  make_deletions_stats_from_counts(df_reference_file_list,"all")
-  make_deletions_stats_from_counts(df_reference_file_list[df_reference_file_list$TumourNormal=="TUMOUR" & df_reference_file_list$PanelVersion=="v1",],"v1_tumour")
-  make_deletions_stats_from_counts(df_reference_file_list[df_reference_file_list$TumourNormal=="GERMLINE"  & df_reference_file_list$PanelVersion=="v1.1",],"v1.1_normal")
-  make_deletions_stats_from_counts(df_reference_file_list[df_reference_file_list$TumourNormal=="TUMOUR"  & df_reference_file_list$PanelVersion=="v1.1",],"v1.1_tumour")
+read_counts_table <- function(filename) {
+  pq_boundary <- list (chr1 = 125000000, chr10 =  40200000,  chr11 =  53700000,  chr12 =  35800000,  chr13 =	17900000,  chr14 =	17600000,  chr15 =	19000000,  chr16 =	36600000,  chr17 =	24000000,  chr18 =	17200000,  chr19 =	26500000,  chr2 =	93300000,  chr20 =	27500000,  chr21 =	13200000,  chr22 =	14700000,  chr3 =	91000000,  chr4 =	50400000,  chr5 =	48400000,  chr6 =	61000000,  chr7 =	59900000,  chr8 =	45600000,  chr9 =	49000000,  chrX =	60600000,  chrY =	12500000)
+  whitelist_path = CFG$common_deletion_list
+  df_whitelist <- read.table(whitelist_path,header=TRUE,stringsAsFactors=FALSE)
+  df_roi <- df_whitelist[!is.na(df_whitelist$Gene),c("Gene","Chr","Arm","Start","End")]
+  rownames(df_roi) <- df_roi$Gene
+  gv$log <<- paste0(isolate(gv$log),flog.info("Reading counts from %s.",filename))
+  df <- read.table(filename,header=TRUE,stringsAsFactors=FALSE,sep = '\t')
+  s <- sub(".*cnv/","",filename)
+  s <- sub("_.*tsv","",s)
+  if(ncol(df)==1) {
+    colnames(df)[1] <- "raw"
+    df$chr <- sub(":.*$","",rownames(df))
+    df$start <- sub("-.*$","",sub("^.*:","",rownames(df)))
+    df$end <- sub("^.*-","",sub("^.*:","",rownames(df)))
+  }
+  df$filename <- s
+  df$arm <- ifelse(df$start < pq_boundary[df$chr],"p","q")
+  df$gene <- ""
+  for (gene in df_roi$Gene) {
+    row <- df_roi[gene,]
+    idx <- ifelse(df$chr == row$Chr & df$end <= row$End & df$start >= row$Start,TRUE,FALSE)
+    df$gene[idx] <- gene
+  }
+  return(df)
 }
+# -------------------------------------------------------------------
 
 
 # -------------------------------------------------------------------
-make_deletions_stats_from_counts <- function (df_reference_file_list,list_name) {
-  samples_file <- paste0(list_name,"_samples.tsv")
-  mean_file <- paste0(list_name,"_mean.tsv")
-  cv_file <- paste0(list_name,"_cv.tsv")
-  n_file <- paste0(list_name,"_n.tsv")
-  med_file <- paste0(list_name,"_med.tsv")
-  mad_file <- paste0(list_name,"_mad.tsv")
-  madcv_file <- paste0(list_name,"_madcv.tsv")
-  sample_nums_file <- paste0(list_name,"_sample_nums.tsv")
-  cv_plot_name <- paste0(list_name,"_cv.pdf")
-                         
-  df_samples <- do.call(rbind, lapply(df_reference_file_list$CountsPath,read_counts_table))  
-  write.table(df_samples,samples_file,row.names=FALSE,sep="\t",quote = FALSE)
-  dim(df_samples)
+make_deletions_stats <- function (make_distributions,file_list,bedtype) {
+  if(make_distributions==TRUE) {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Making NULL distributions for deletions."))
+  }
+  #outpath <- makepath(panel = CFG$panel_path,run = CFG$run_path,resolution = bedtype,filetype = "reference",df_cfg = DF_CFG)
+  #reference_file_name <- paste0(reference_file_name,".tsv")
+  samples_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_samples",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
+  mean_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_mean",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
+  cv_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_cv",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
+  n_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_n",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
+  
+  if(make_distributions==TRUE) {
+    if((!file_no_clobber(mean_file))  && (!file_no_clobber(cv_file)) && file_apply_lock(mean_file) && file_apply_lock(cv_file)) { 
+      gv$log <<- paste0(isolate(gv$log),flog.info("Making deletions references. Need %s and %s.",mean_file,cv_file))
+      df_samples <- do.call(rbind, lapply(file_list,read_counts_table))  
+      write.table(df_samples,samples_file,row.names=FALSE,sep="\t",quote = FALSE)
+    } else {
+      gv$log <<- paste0(isolate(gv$log),flog.info("Already have deletions references"))
+      return (NULL)
+    }
+  } else {
+    df_samples <- read_counts_table(file_list)
+  }
   chrs <- unique(df_samples$chr)
-  # chrs <- c("chr1","chr9","chr10","chr12","chr16","chr19","chr20")
+  genes <- unique(df_samples$gene[df_samples$gene!=""])
   arms <- unique(df_samples$arm)
-  # samples <- unique(df_samples$filename)
-  run_sample <- paste0(df_samples$run,"_",df_samples$sample)
-  samples <- unique(run_sample)
-  gois <- c("TP53","ATM","BIRC3")
-  gois <- c("TP53")
-  subset_names <- c(chrs,paste0(chrs,arms[1]),paste0(chrs,arms[2]),gois)
-  # subset_names <- c(chrs,gois)
-  idx_subset_names <- unique(c(chrs,paste0(chrs,arms[1]),paste0(chrs,arms[2]),gois,samples))
+  samples <- unique(df_samples$filename)
+  subset_names <- c(chrs,paste0(chrs,arms[1]),paste0(chrs,arms[2]),genes)
+  idx_subset_names <- c(chrs,paste0(chrs,arms[1]),paste0(chrs,arms[2]),genes,samples)
   idx_subsets <- matrix(FALSE,nrow(df_samples),length(idx_subset_names))
   colnames(idx_subsets) <- idx_subset_names
-  
-  for (goi in gois) {
-    idx_subsets[,goi] <- df_samples$goi==goi
-  }  
-  for (sample in samples) { idx_subsets[,sample] <- run_sample == sample }
+  # idx_subsets[,"p53"] <- df_samples$p53 
+  for (gene in genes) { idx_subsets[,gene] <- df_samples$gene == gene }
+  for (sample in samples) { idx_subsets[,sample] <- df_samples$filename == sample }
   for (chr in chrs) { idx_subsets[,chr] <- df_samples$chr == chr }
   for (chr in chrs) { idx_subsets[,paste0(chr,"p")] <- idx_subsets[,chr] & df_samples$arm == "p" }
   for (chr in chrs) { idx_subsets[,paste0(chr,"q")] <- idx_subsets[,chr] & df_samples$arm == "q" }
-  
-  #   # Unify idx_noise_cutoff across samples
-  #   for (sample in samples) { 
-  #     df_samples$ref_median[idx_subsets[,sample]]  <- df_samples$ref_median[idx_subsets[,samples[1]]]
-  #     df_samples$ref_sd[idx_subsets[,sample]]  <- df_samples$ref_sd[idx_subsets[,samples[1]]]
-  #   }
-  #   idx_noise_cutoff <- (!is.na(df_samples$ref_median) & 
-  #     !is.na(df_samples$ref_sd) &
-  #     df_samples$ref_median > 100 & 
-  #     (df_samples$ref_sd / df_samples$ref_median) < 0.1) | df_samples$p53
-  
-  #sample_nums <- matrix(0,length(samples),length(gois)*length(chrs))
-  sample_nums <- matrix(0,length(samples),length(subset_names)^2)
-  # colnames(sample_nums) <- as.vector(outer(paste0(gois,"_"),chrs,FUN=paste0))
-  colnames(sample_nums) <- as.vector(outer(paste0(subset_names,"_"),subset_names,FUN=paste0))
-  split_colnames <- t(matrix(unlist(strsplit(colnames(sample_nums),"_")),nrow=2))
-  rownames(sample_nums) <- samples
   xmean <- matrix(0,length(subset_names),length(subset_names))
   colnames(xmean) <- subset_names
   rownames(xmean) <- subset_names
   xsd <- xmean
   xcv <- xmean
   xn <- xmean
-  xmed <- xmean
-  xmad <- xmean
-  xmadcv <- xmean
-
   xraw <- df_samples$raw
   for (s1 in subset_names) {
-    idx1 <- idx_subsets[,s1] #& idx_noise_cutoff
+    idx1 <- idx_subsets[,s1]# & idx_noise_cutoff
     if(sum(idx1)>0) {
-      for (s2 in subset_names[subset_names < s1]) {
-        idx2 <- idx_subsets[,s2] #& idx_noise_cutoff
+      for (s2 in subset_names) {
+        idx2 <- idx_subsets[,s2] # & idx_noise_cutoff
         if(sum(idx2)>0) {
           s <- array(0,length(samples))
           s_ok <- array(FALSE,length(samples))
@@ -1890,86 +1941,64 @@ make_deletions_stats_from_counts <- function (df_reference_file_list,list_name) 
               if(sum(idx2s)>0) {
                 s[sample] <- sum(xraw[idx1s]) / sum(xraw[idx2s])
                 s_ok[sample] <- TRUE
-                idx_per_sample_1 = (s1==split_colnames[,1]) & (s2==split_colnames[,2]) 
-                idx_per_sample_2 = (s1==split_colnames[,2]) & (s2==split_colnames[,1]) 
-                if(sum(idx_per_sample_1)==1) {
-                  sample_nums[sample,idx_per_sample_1] <- s[sample]
-                  sample_nums[sample,idx_per_sample_2] <- 1/s[sample]
-                }
-                if(sum(idx_per_sample_2)==1) {
-                  sample_nums[sample,idx_per_sample_1] <- 1/s[sample]
-                  sample_nums[sample,idx_per_sample_2] <- s[sample]
-                }
               }
             }
           }
           s_n <- sum(s_ok)
-          if(sum(s_ok)>0) {
-            ss <- s[s_ok]
-            ss_inv <- 1/ss
-            xmean[s1,s2] <- mean(ss)
-            xsd[s1,s2] <- sd(ss)
-            xmed[s1,s2] <- median(ss)
-            xmad[s1,s2] <- mad(ss)
-            xn[s1,s2] <- s_n
-            xmean[s2,s1] <- mean(ss_inv)
-            xsd[s2,s1] <- sd(ss_inv) 
-            xmed[s2,s1] <-  median(ss_inv)
-            xmad[s2,s1] <- mad(ss_inv)
-            xn[s2,s1] <-  s_n
-            print(paste0(list_name,"_",s1," ",s2," n = ",xn[s1,s2]," mean = ", xmean[s1,s2] ," sd = ",xsd[s1,s2]," meanT = ",xmean[s2,s1]))
-            if(s1=="TP53" || s2=="TP53") {
-              # s_mode  <- mlv(s)$M
-              s_median <- median(s, na.rm = TRUE)
-              s <- s / s_median
-              df_s <- data.frame(N = s)
-              p <- ggplot(df_s, aes(N)) + geom_histogram()
-              outfile <- paste0(list_name,"_",s1,"_",s2,'_',xn[s1,s2],'.png')
-              ggsave(outfile)
+          if(s_n>0) {
+            xmean[s1,s2] <- mean(s[s_ok])
+            if(s_n>1) {
+              xsd[s1,s2] <- sd(s[s_ok])
             }
+            xn[s1,s2] <- s_n
+            if(s1=="chr1") {
+              gv$log <<- paste0(isolate(gv$log),flog.info("Calculating ration for %s",s1))
+            }
+            # print(paste0(s1," ",s2," n = ",xn[s1,s2]," mean = ", xmean[s1,s2] ," sd = ",xsd[s1,s2]," cv = ",xsd[s1,s2]/xmean[s1,s2]))
           } # if s_ok
         } # if idx2
       } # for s2
     } # if idx1
   } # for s1
-  xcv <- xsd / xmean
-  xmadcv <- xmad / xmed
-  write.table(sample_nums,sample_nums_file,sep="\t",quote = FALSE)
-  write.table(xcv,cv_file,sep="\t",quote = FALSE)
-  write.table(xmean,mean_file,sep="\t",quote = FALSE)
-  write.table(xn,n_file,sep="\t",quote = FALSE)
-  write.table(xmed,med_file,sep="\t",quote = FALSE)
-  write.table(xmad,mad_file,sep="\t",quote = FALSE)
-  write.table(xmadcv,madcv_file,sep="\t",quote = FALSE)
+  if(make_distributions==TRUE) {
+    xcv <- xsd / xmean
+    write.table(xcv,cv_file,sep="\t",quote = FALSE)
+    write.table(xmean,mean_file,sep="\t",quote = FALSE)
+    write.table(xn,n_file,sep="\t",quote = FALSE)
+    file_remove_lock(mean_file)
+    file_remove_lock(cv_file)
+  } else {
+    dist_mean <- read.table(mean_file,sep="\t")
+    dist_cv <- read.table(cv_file,sep="\t")
+    zscore <- (xmean - dist_mean)/dist_mean/dist_cv
+    n <- (xmean/dist_mean) * 2.0
+    row_idx <- rowSums(!is.na(zscore))>0  
+    col_idx <- colSums(!is.na(zscore))>0  
+    zscore_med <- colMedians(as.matrix(zscore[row_idx,col_idx]),na.rm = TRUE)
+    n_med <- colMedians(as.matrix(n[row_idx,col_idx]),na.rm = TRUE)
+    df <- cbind(zscore_med,n_med)
+    row.names(df) <- row.names(n)[row_idx]
+    return(data.frame(df))
+  }
+}
+# -------------------------------------------------------------------
 
-#   df_xcv  <- read.table(cv_file,header = TRUE,stringsAsFactors = FALSE)
-#   mat_xcv <- as.matrix(df_xcv)
-#   col_idx <- !grepl("[XY]",rownames(mat_xcv)) & (!grepl("chr.*[pq]$",rownames(mat_xcv))) & rowSums(!is.na(mat_xcv))!=0  
-#   row_idx <- !grepl("[XY]",colnames(mat_xcv)) & (!grepl("chr.*[pq]$",rownames(mat_xcv))) & colSums(!is.na(mat_xcv))!=0  
-#   mat_xcv <- mat_xcv[row_idx,col_idx]
-#   mat_xcv[is.na(mat_xcv)] <- t(mat_xcv)[is.na(mat_xcv)]
-#   mat_xcv[is.na(mat_xcv)] <- 0
-  # corrplot(mat_xcv,type="lower", order="alphabet", title="cv", is.corr=FALSE)
-#   corrplot(mat_xcv,type="lower", order="hclust", title="cv", is.corr=FALSE)
-#   dev.copy2pdf(file = cv_plot_name, height=10, width=10)
-#   df_mean  <- read.table(mean_file,header = TRUE,stringsAsFactors = FALSE)
-#   mat_x <- as.matrix(df_mean)
-#   mat_x[mat_x==0] <- t(mat_x)[mat_x==0]
-#   mat_x[mat_x==0]  <- 1
-#   col_idx <- !grepl("[XY]",rownames(mat_x)) & (!grepl("chr.*[pq]$",rownames(mat_x))) & rowSums(mat_x)!=0 & rowSums(!is.na(mat_x))!=0  
-#   row_idx <- !grepl("[XY]",colnames(mat_x)) & (!grepl("chr.*[pq]$",rownames(mat_x))) & colSums(mat_x)!=0 & colSums(!is.na(mat_x))!=0  
-#   col_idx <- !grepl("[XY]",rownames(mat_x)) & (!grepl("chr.*[pq]$",rownames(mat_x))) & rowSums(!is.na(mat_x))!=0  
-#   row_idx <- !grepl("[XY]",colnames(mat_x)) & (!grepl("chr.*[pq]$",rownames(mat_x))) & colSums(!is.na(mat_x))!=0  
-#   mat_x <- mat_x[row_idx,col_idx]
-#   corrplot(log10(mat_x),type="lower", order="hclust", title="log10(ratio)", is.corr=FALSE)
-#   corrplot(log10(mat_x),type="lower", title="log10(ratio)", is.corr=FALSE)
-#   p <- ggplot(df, aes(x=N, y=weighted_mean)) + geom_point(shape=1)
-#   p + facet_grid(chr ~ whiteListed)
-#   p <- ggplot(df, aes(N)) + geom_histogram(binwidth = 0.01)
-#   p + facet_grid(chr ~ whiteListed)
-#   df$flag <- round(log10(df$bins))
-#   p <- ggplot(df, aes(N)) + geom_histogram(binwidth = 0.01) + facet_grid(flag ~ .)  
-#   p <- ggplot(df, aes(N)) + geom_histogram(binwidth = 0.01) + facet_grid(chr ~ whiteListed)
+# -------------------------------------------------------------------
+make_deletions_zscores <- function(sample,bedtype) {
+  delpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "sv",resolution = bedtype, extension = "_del_zscore.tsv",df_cfg = DF_CFG)
+  if(!file_no_clobber(delpath) && file_apply_lock(delpath)) {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Making deletions zscores: %s.",delpath))
+    cnvpath <- makepath(panel = CFG$panel,run = CFG$run_path,sample = sample,filetype = "cnv",resolution = bedtype, extension = ".tsv",df_cfg = DF_CFG)
+    countspath <- sub(".tsv$","_fc_counts.tsv",cnvpath)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Reading %s",countspath))
+    df <- make_deletions_stats(FALSE,countspath,bedtype)
+    write.table(df,delpath,row.names=FALSE,sep="\t",quote = FALSE)
+    file_remove_lock(delpath)
+    return (NULL)
+  } else {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Already have deletion zscores for %s",delpath))
+    return (NULL)
+  }
 }
 # -------------------------------------------------------------------
 
