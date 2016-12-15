@@ -1069,7 +1069,7 @@ makeReference = function (df_reference_file_list,reference_file_name,df_gc) {
   }
   gv$log <<- paste0(isolate(gv$log),
                     flog.info("From counts: Males:Females:NA = %d:%d:%d",
-                              sum(female_idx,na.rm=TRUE),sum(!female_idx,na.rm=TRUE),sum(is.na(female_idx))
+                              sum(!female_idx,na.rm=TRUE),sum(female_idx,na.rm=TRUE),sum(is.na(female_idx))
                               )
                     )
   
@@ -1079,8 +1079,8 @@ makeReference = function (df_reference_file_list,reference_file_name,df_gc) {
                    AUTO = auto_medians, 
                    X_ON_AUTO = x_ratio,
                    Y_ON_AUTO = y_ratio,
-                   COUNTS_IS_FEMALE = female_idx,
-                   TABLE_IS_FEMALE = (df_reference_file_list$Sex=="Female")
+                   COUNTS = ifelse(female_idx,"Female","Male"),
+                   TABLE = df_reference_file_list$Sex
   ))
   
   if(length(x_ratio)<=MINIMUM_SAMPLES_FOR_SEX_DETERMINATION_BY_CLUSTERING) {
