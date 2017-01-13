@@ -1538,7 +1538,7 @@ make_vcfs <- function(sample) {
   } else {
     gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",vcfpath))
   }
-  return(df_files)
+  # return(df_files)
 }
 # -------------------------------------------------------------------
 
