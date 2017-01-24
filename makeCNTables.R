@@ -1422,6 +1422,7 @@ do_cbc <- function (N,df_reference) {
 
 # -------------------------------------------------------------------
 make_bams <- function(sample) {
+  ret <- 0
   chrom_file <- CFG$chrom_file
   chrom_index_file <- CFG$chrom_index_file
   number_of_cores <- CFG$number_of_cores
@@ -1442,6 +1443,8 @@ make_bams <- function(sample) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Need to join files matching %s (%d matches)",fastq_dir,length(fastqpaths)))
       fastqpaths[1] <-  paste0(sample,"_R1.fastq.gz")
       fastqpaths[2] <-  paste0(sample,"_R2.fastq.gz")
+      system2('cat',paste0(fastq_dir,"/*R1*fastq.gz"),stdout = fastqpaths[1])
+      system2('cat',paste0(fastq_dir,"/*R2*fastq.gz"),stdout = fastqpaths[2])
     } else if (length(fastqpaths) < 2) {
        gv$log <<- paste0(isolate(gv$log),flog.error("No matching fastq files in %s",fastq_dir))
        gv$broken <<- TRUE
@@ -1450,11 +1453,18 @@ make_bams <- function(sample) {
     cwd <- getwd()
     chrom_index_file <- ifelse(isAbsolutePath(chrom_index_file),chrom_index_file,file.path(cwd,chrom_index_file))
     setwd(dirname(bampath))
-    system2('cat',paste0(fastq_dir,"/*R1*fastq.gz"),stdout = fastqpaths[1])
-    gv$log <<- paste0(isolate(gv$log),flog.info("Made %s",fastqpaths[1]))
-    system2('cat',paste0(fastq_dir,"/*R2*fastq.gz"),stdout = fastqpaths[2])
-    gv$log <<- paste0(isolate(gv$log),flog.info("Made %s",fastqpaths[2]))
-    ret <- 0
+    if(!file.exists(fastqpaths[1]) || file.size(fastqpaths[1])<1) {
+        gv$log <<- paste0(isolate(gv$log),flog.info("fastq file not found or zero length: %s",fastqpaths[1]))
+        gv$broken <<- TRUE
+        return(NULL)
+    }
+    if(!file.exists(fastqpaths[2]) || file.size(fastqpaths[2])<1) {
+        gv$log <<- paste0(isolate(gv$log),flog.info("fastq file not found or zero length: %s",fastqpaths[2]))
+        gv$broken <<- TRUE
+        return(NULL)
+    }
+    gv$log <<- paste0(isolate(gv$log),flog.info("Have %s and %s",fastqpaths[1],fastqpaths[2]))
+    
     if(SPAWN_EXTERNAL_ALIGNER) {
       ret <- system2('subread-align',c('-i',chrom_index_file,'-r',fastqpaths[1],'-R',fastqpaths[2],'-o',basename(bampath),
                                 '-t','1','--sv','-T',number_of_cores,'-B',16))
@@ -1538,7 +1548,7 @@ make_vcfs <- function(sample) {
   } else {
     gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",vcfpath))
   }
-  # return(df_files)
+  return(NULL)
 }
 # -------------------------------------------------------------------
 
