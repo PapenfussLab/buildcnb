@@ -305,6 +305,10 @@ makepath <- function(panel = NULL,
   filetype_path <- df_cfg[paste0(filetype,"_path"),"value"]
   if(sum(grepl(filetype,c("cnv","vcf","sv","baf","fastq","bam")))>0) {
     # store by run unless asked to do otherwise
+    # optionally put an EXTRA directory under sample to store the data
+    if(sum(names(CFG)=="per_sample_root")==1) {
+      sample <- file.path(sample,CFG$per_sample_root)
+    }    
     ret <- ifelse(CFG$store_by_panel==TRUE,
                   file.path(base_path,panel,run,sample,filetype_path,paste0(sample,extension)),
                   file.path(base_path,run,sample,filetype_path,paste0(sample,extension)))
@@ -495,7 +499,7 @@ make_something <- function(filetype,bedtypes = "",samples = "", df_arg = NULL) {
       if(is.data.frame(df_arg)) { args$df = df_arg }
       gv$log <<- paste0(isolate(gv$log),flog.info("sample = %s bedtype = %s",sample,bedtype))
       df_something <- do.call(paste0("make_",filetype,"s"),args) 
-      df <- rbind(df,df_something)
+      df <- rbind.fill(df,df_something)
     }
   }
   return(df)
@@ -533,7 +537,7 @@ make_corrected_counts  <-  function(sample,bedtype) {
   bedfile <- BEDFILENAMES[bedtype]
   gv$log <<- paste0(isolate(gv$log),flog.info("Making counts for %d samples with %s and %s",length(SAMPLES),bedfile,bedtype))
   df_cnb <-  write_corrected_counts(sample,bedfile,"corrected_counts")
-  gv$log <<- paste0(isolate(gv$log),flog.info("Processed %d samples.",nrow(df_cnb)))
+  gv$log <<- paste0(isolate(gv$log),flog.info("Processed %d samples.",ifelse(is.null(df_cnb),0,nrow(df_cnb))))
   return(df_cnb)
 }
 # -------------------------------------------------------------------
@@ -647,7 +651,7 @@ write_corrected_counts <- function(sample,bedfile,do_what) {
     lapply(c("fixbam","sam","tmp","bin"), remove_files_by_suffix)
     file_remove_lock(countspath)  
   }
-  # TODO: From here
+  
   if(do_what=="counts" || (do_what=="corrected_counts" && file_no_clobber(outpath))) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Skipping GC correction, segmentation, reference correction for %s / %s",bedfile,sample))
     if(file.exists(cnb_info_path)) {
@@ -1443,8 +1447,6 @@ make_bams <- function(sample) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Need to join files matching %s (%d matches)",fastq_dir,length(fastqpaths)))
       fastqpaths[1] <-  paste0(sample,"_R1.fastq.gz")
       fastqpaths[2] <-  paste0(sample,"_R2.fastq.gz")
-      system2('cat',paste0(fastq_dir,"/*R1*fastq.gz"),stdout = fastqpaths[1])
-      system2('cat',paste0(fastq_dir,"/*R2*fastq.gz"),stdout = fastqpaths[2])
     } else if (length(fastqpaths) < 2) {
        gv$log <<- paste0(isolate(gv$log),flog.error("No matching fastq files in %s",fastq_dir))
        gv$broken <<- TRUE
@@ -1453,6 +1455,11 @@ make_bams <- function(sample) {
     cwd <- getwd()
     chrom_index_file <- ifelse(isAbsolutePath(chrom_index_file),chrom_index_file,file.path(cwd,chrom_index_file))
     setwd(dirname(bampath))
+    if(length(fastqpaths) > 2) {
+        system2('cat',paste0(fastq_dir,"/*R1*fastq.gz"),stdout = fastqpaths[1])
+        system2('cat',paste0(fastq_dir,"/*R2*fastq.gz"),stdout = fastqpaths[2])
+    }
+
     if(!file.exists(fastqpaths[1]) || file.size(fastqpaths[1])<1) {
         gv$log <<- paste0(isolate(gv$log),flog.info("fastq file not found or zero length: %s",fastqpaths[1]))
         gv$broken <<- TRUE
@@ -1628,6 +1635,7 @@ make_deletions <- function(sample) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Found %d segments",nrow(df_del)))     
     df_del$whiteListed <- FALSE
     df_del$Arm <- ""
+    df_del$Gene <- "NA"
     df_del$N <- 2^df_del$log2N
     df_del$weighted_mean <- 0
     df_del$weighted_var <- 0
@@ -1655,14 +1663,16 @@ make_deletions <- function(sample) {
         # If the pval is NA then it's a whole-chromosome event. If other stuff is NA, it's dodgy.
         if(!(is.na(row$pval) || is.na(df_del$weighted_mean[n]) || is.na(df_del$weighted_sem[n]))) {
           if(!is.na(row$pval) || (df_del$weighted_mean[n] - 2)^2 > 3 * df_del$weighted_sem[n]) {
-            idx <- row$Chr == df_whitelist$Chr &
-              row$Start >= df_whitelist$Start &
-              row$End <= df_whitelist$End &
+            idx <- (!is.na(df_whitelist$Gene)) &
+              row$Chr == df_whitelist$Chr &
+              ((row$Start <= df_whitelist$TestEnd & row$Start>= df_whitelist$TestStart) | 
+                (row$End >= df_whitelist$TestStart & row$End <= df_whitelist$TestEnd) |
+                (row$Start <= df_whitelist$TestStart & row$End >= df_whitelist$TestEnd)) &
               0 != df_whitelist$GainLoss
             # row$Start <= df_whitelist$RequiredStart &
             # row$End >= df_whitelist$RequiredEnd &
             # "pq" != df_whitelist$Arm) $
-            if(sum(idx)==1) {
+            if(sum(idx)>=1) {
               df_del$whiteListed[n] <- TRUE
               df_del$Arm[n] <- df_whitelist$Arm[idx][1]
               df_del$Gene[n] <- df_whitelist$Gene[idx][1]
@@ -1670,6 +1680,10 @@ make_deletions <- function(sample) {
               gv$log <<- paste0(isolate(gv$log),
                                 flog.info("Found whitelisted entry: %s%s",
                                           row$Chr,df_del$Arm[n]))
+            }
+            if(sum(idx)>=2) {
+              df_del$Gene[n] <- paste0(df_whitelist$Gene[idx],collapse = ",")
+              gv$log <<- paste0(isolate(gv$log),flog.info("Multi-gene deletion: %s%s: %s",row$Chr,df_del$Arm[n],df_del$Gene[n]))
             }
           }
         } # if not dodgy
@@ -1853,26 +1867,36 @@ make_bins <- function(bedtype) {
 # -------------------------------------------------------------------
 make_gc_tables <- function(bedtype) {
   chrom_file <- CFG$chrom_file
-  destfile <- CFG[[BEDFILENAMES[bedtype]]]
+  bedfile <- CFG[[BEDFILENAMES[bedtype]]]
+  gc_file <- bedrow2gcrow(BEDFILENAMES[bedtype])$value
   
-  if(!file_no_clobber(destfile) && file_apply_lock(destfile)) {
+  if(!file_no_clobber(gc_file) && file_apply_lock(gc_file)) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Making GC corrections. Reading: %s",bedfile))
     intervals <- import.bed(bedfile)
     gv$log <<- paste0(isolate(gv$log),flog.info("Making GC corrections. Reading: %s",chrom_file))
     reference <- readDNAStringSet(chrom_file)
     
-    gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",destfile))
+    gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",gc_file))
     # for each chr, something like this
     find_gc_content <- function(idx) { 
       seq <- reference[idx]
-      # Assumes that naming fields in fasta file are chr2 with nothing else.
-      gv$log <<- paste0(isolate(gv$log),flog.info("Making GC content for %s:%s",names(seq),destfile))    
-      chr_int <- intervals[seqnames(intervals)==names(seq)] 
+      seq_names <- names(seq)
+      seq_names <-sub("^ *","",seq_names)
+      seq_names <-sub(" .*$","",seq_names)
+
+      print(seq_names)
+      # Add chr if needed, because bedfile has one
+      if(sum(!grepl("^chr",seq_names))>0) {
+        seq_names <- paste0("chr",seq_names)
+      }
+      gv$log <<- paste0(isolate(gv$log),flog.info("Making GC content for %s:%s",seq_names,gc_file))    
+      chr_int <- intervals[seqnames(intervals)==seq_names] 
       if(length(chr_int)==0) {
         gv$log <<- paste0(
           isolate(gv$log),
-          flog.warn("Seqname %s in %s not found in reference %s",names(seq),chrom_file,bedfile)
-        )    
+          flog.warn("Seqname %s in %s not found in reference %s",seq_names,chrom_file,bedfile)
+        )
+        return(NULL)
       }
       str <- Views(seq[[1]],start(chr_int),end(chr_int))
       gc <- letterFrequency(str,letters="CG",as.prob=TRUE)
@@ -1886,12 +1910,12 @@ make_gc_tables <- function(bedtype) {
       )
     }
     colnames(df_gc) <- c("chr","start","end","gc")
-    write.table(df_gc,destfile,row.names=FALSE,quote = FALSE,sep="\t")
-    file_remove_lock(destfile)
-    gv$log <<- paste0(isolate(gv$log),flog.info("Making GC content for %s: Done",destfile))  
+    write.table(df_gc,gc_file,row.names=FALSE,quote = FALSE,sep="\t")
+    file_remove_lock(gc_file)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Making GC content for %s: Done",gc_file))  
     return(NULL)
   }
-  gv$log <<- paste0(isolate(gv$log),flog.info("Have: %s",destfile))
+  gv$log <<- paste0(isolate(gv$log),flog.info("Have: %s",gc_file))
   return(NULL)
 }
 # -------------------------------------------------------------------
@@ -2006,6 +2030,7 @@ read_counts_table <- function(filename) {
   df_whitelist <- read.table(whitelist_path,header=TRUE,stringsAsFactors=FALSE)
   df_roi <- df_whitelist[!is.na(df_whitelist$Gene),c("Gene","Chr","Arm","TestStart","TestEnd")]
   rownames(df_roi) <- df_roi$Gene
+  gv$log <<- paste0(isolate(gv$log),flog.info("Looking at regions for %s.",paste0(df_roi$Gene,collapse = ",")))
   gv$log <<- paste0(isolate(gv$log),flog.info("Reading counts from %s.",filename))
   df <- read.table(filename,header=TRUE,stringsAsFactors=FALSE,sep = '\t')
   s <- sub(".*cnv/","",filename)
