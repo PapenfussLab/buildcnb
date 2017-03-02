@@ -80,6 +80,7 @@ MEDIAN_NORM_CUTOFF <- 10   # Counts in a bin with a dist whose median less that 
 MODE_NORM_CUTOFF <- 100   # Counts in a bin with a dist whose mode less that this are thrown away for mode-based normalisation
 MAX_PROPORTION_ZERO_ENTRIES <- 0.5 # If more than this proportion of counts is less that the cutoff, something is wrong.
 MEDIAN_DATA_POINTS_CUTOFF <- 3
+MEDIAN_MAGIC <- 0.2 # Magic number. MODE_NORM_CUTOFF default is for targeted coverage in the hundreds. For lower coverage, use 0.2 * median
 MODE_DATA_POINTS_CUTOFF <- 3
 MAXIMUM_FEMALE_Y_ON_AUTO_RATIO <- 0.125
 MINIMUM_FEMALE_X_ON_AUTO_RATIO <- 0.75
@@ -303,15 +304,14 @@ makepath <- function(panel = NULL,
   }
   base_path <- df_cfg["base_path","value"]
   filetype_path <- df_cfg[paste0(filetype,"_path"),"value"]
+  per_sample_root_path <- ifelse(sum(names(CFG)=="per_sample_root_path")==1,CFG$per_sample_root_path,"")
+  per_sample_root_path <- ifelse(per_sample_root_path==".","",per_sample_root_path)
   if(sum(grepl(filetype,c("cnv","vcf","sv","baf","fastq","bam")))>0) {
     # store by run unless asked to do otherwise
     # optionally put an EXTRA directory under sample to store the data
-    if(sum(names(CFG)=="per_sample_root")==1) {
-      sample <- file.path(sample,CFG$per_sample_root)
-    }    
     ret <- ifelse(CFG$store_by_panel==TRUE,
-                  file.path(base_path,panel,run,sample,filetype_path,paste0(sample,extension)),
-                  file.path(base_path,run,sample,filetype_path,paste0(sample,extension)))
+                  file.path(base_path,panel,run,sample,per_sample_root_path,filetype_path,paste0(sample,extension)),
+                  file.path(base_path,run,sample,per_sample_root_path,filetype_path,paste0(sample,extension)))
   } else if (filetype == "reference") {
     reference_path <- df_cfg["reference_path","value"]
     if(is.null(panel)) { ret <- reference_path }
@@ -324,7 +324,9 @@ makepath <- function(panel = NULL,
   if(create_dir==TRUE && dir.exists(path_to_file)==FALSE) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Making %s for %s",path_to_file,ret))
     dir.create(path_to_file, recursive = TRUE)
-  } 
+  }
+  gv$log <<- paste0(isolate(gv$log),flog.info("%s / %s / %s / %s / %s / %s",panel,run,sample,per_sample_root_path,filetype,ret))
+ 
   return(ret)
 }
 # -------------------------------------------------------------------
@@ -1308,7 +1310,8 @@ applyReference  <- function (ref_name,refs,df) {
   # Median normalise truncated raw counts
   idx <- (!is.na(df$raw)) & (df$raw>=MEDIAN_NORM_CUTOFF) & (!df$blackListed)
   if(sum(df$raw==0) > length(idx) * MAX_PROPORTION_ZERO_ENTRIES) {
-    gv$log <<- paste0(isolate(gv$log),flog.warn("Failed to apply reference properly or bad sample? Too many counts entries are zero. Something is wrong. Entries = %d, Zero Entries = %d, Usable Entries = %d",length(idx),sum(idx),sum(df$raw==0)))
+    gv$log <<- paste0(isolate(gv$log),flog.warn("Failed to apply reference properly or bad sample? Too many counts entries are zero. Something is wrong. Entries = %d, Zero Entries = %d, Usable Entries = %d",
+         length(idx),sum(idx),sum(df$raw==0)))
     # gv$broken <<- TRUE
     # return(NULL)
   } 
@@ -1324,30 +1327,36 @@ applyReference  <- function (ref_name,refs,df) {
   nmax <- length(ratio)
   fom <- list()
   if(sum(idx) < MEDIAN_DATA_POINTS_CUTOFF) {
-    gv$log <<- paste0(isolate(gv$log),flog.error("Unable to normalise. Only have %d points out of %d",sum(idx),length(idx)))
+    gv$log <<- paste0(isolate(gv$log),flog.error("Unable to normalise. Only have %d points out of %d. Need at least %d to calculate median.",sum(idx),length(idx),MEDIAN_DATA_POINTS_CUTOFF))
     gv$broken <<- TRUE
     return(df)
   }
-  idx_mode  <- idx & df$raw>MODE_NORM_CUTOFF & df_reference$raw>MODE_NORM_CUTOFF
+  cn_median <- median(cor[idx])
+  mode_norm_cutoff <- min(MEDIAN_MAGIC * cn_median,MODE_NORM_CUTOFF)
+  cn_mode <- 0	
+  idx_mode  <- idx & df$raw>mode_norm_cutoff & df_reference$raw>mode_norm_cutoff
   if(sum(idx_mode) < MODE_DATA_POINTS_CUTOFF) {
-    gv$log <<- paste0(isolate(gv$log),flog.error("Unable to normalise. Only have %d points out of %d",sum(idx),length(idx)))
+    gv$log <<- paste0(isolate(gv$log),flog.error("Unable to normalise. Only have %d points out of %d. Need at least %d bigger than %f to calculate mode.",sum(idx_mode),length(idx_mode),MODE_DATA_POINTS_CUTOFF,mode_norm_cutoff))
+    gv$log <<- paste0(isolate(gv$log),flog.error("sample/ref= NA: %d / %d   zero_entries: %d / %d median: %f / %f mean: %f / %f max: %f / %f",
+      sum(is.na(df$raw)),sum(is.na(df_reference$raw)),sum(df$raw==0,na.rm=TRUE),sum(df_reference$raw==0,na.rm=TRUE),median(df$raw,na.rm=TRUE),median(df_reference$raw,na.rm=TRUE),mean(df$raw,na.rm=TRUE),mean(df_reference$raw,na.rm=TRUE),max(df$raw,na.rm=TRUE),max(df_reference$raw,na.rm=TRUE)))
     gv$broken <<- TRUE
     if(normalise_on_mode==TRUE) { return(df) }
+  } else {
+    cn_mode <- tryCatch(
+      mlv(cor[idx_mode], method = "lientz", bw = 0.2)$M,
+      error=function(cond) { 
+        message("mlv failed:") 
+        gv$log <<- paste0(isolate(gv$log),flog.warn("mlv failed: %s",cond))
+        return(0)
+      }
+    )
   }
-  cn_mode <- tryCatch(
-    mlv(cor[idx_mode], method = "lientz", bw = 0.2)$M,
-    error=function(cond) { 
-      message("mlv failed:") 
-      gv$log <<- paste0(isolate(gv$log),flog.warn("mlv failed: %s",cond))
-      return(NULL)
-    }
-  )
   if(normalise_on_mode==TRUE && cn_mode==0) {
     gv$log <<- paste0(isolate(gv$log),flog.error("Unable to normalise.cn_mode=0"))
     gv$broken <<- TRUE
     return(df)
   }
-  cn_median <- median(cor[idx])
+
   warn_norm <- (abs(cn_mode-cn_median)/(cn_mode+cn_median) > 0.1)
   if(warn_norm) { gv$log <<- paste0(isolate(gv$log),flog.info("##############################################"))}
   gv$log <<- paste0(isolate(gv$log),flog.info("::Normalising %s: Mode = %e Median = %e",ref_name,cn_mode,cn_median))
@@ -1355,7 +1364,7 @@ applyReference  <- function (ref_name,refs,df) {
   cor <- cor / cn_mode
   N = cor * 2
   if(nmax>1) {
-    gv$log <<- paste0(isolate(gv$log),flog.info("Segmenting %s: Found %d bins.",ref_name,nmax))
+    gv$log <<- paste0(isolate(gv$log),flog.info("Applying reference %s: Found %d valid points.",ref_name,nmax))
     fom$smoothness_diff <- mad( ratio[2:nmax] - ratio[1:(nmax-1)]) 
     fom$quantised_cn_diff <- mad(ratio-1)
     cbc_list <- do_cbc(N,df_reference)    
@@ -1716,7 +1725,7 @@ make_deletions <- function(sample) {
 weighted.var.se <- function(x, w, na.rm=FALSE) {
   if (na.rm) { w <- w[i <- !is.na(x)]; x <- x[i] }
   n = length(w)
-  xWbar = wtd.mean(x,w,na.rm=na.rm)
+  xWbar = wtd.mean(x,w,na.na.rm.rm)
   wbar = mean(w)
   out = n/((n-1)*sum(w)^2)*(sum((w*x-wbar*xWbar)^2)-2*xWbar*sum((w-wbar)*(w*x-wbar*xWbar))+xWbar^2*sum((w-wbar)^2))
   return(out)
@@ -1766,51 +1775,55 @@ make_translocations <- function(sample) {
   if(!file_no_clobber(fusions_path) && file_apply_lock(fusions_path)) {
     if(file.exists(putative_fusion_list)) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Reading %s",putative_fusion_list))
-      df_putative_fusions <- read.table(putative_fusion_list,header=TRUE,stringsAsFactors=FALSE)
+      df_putative_fusions <- read.table(putative_fusion_list,header=TRUE,comment.char = "",stringsAsFactors=FALSE)
       gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",fusions_path))
       # colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",  "end",	"sameStrand",	"nSupport")
-      colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",  "end",	"sameStrand",	"nSupport","BreakPoint1_GoUp","BreakPoint2_GoUp")
-      rownames(df_putative_fusions) <- df_putative_fusions$ID
-      df_putative_fusions$idx1 <- 0
-      df_putative_fusions$idx2 <- 0
-      df_putative_fusions$whiteListed <- FALSE
-      df_putative_fusions$name <- ""
-      for (n in 1:nrow(df_putative_fusions)) {
-        putative_fusion <- df_putative_fusions[n,]
-        idx1 <- (putative_fusion$chr == df_whitelist$Chr & 
-                   putative_fusion$start >= df_whitelist$Start & 
-                   putative_fusion$start <= df_whitelist$End & 
-                   putative_fusion$nSupport >= df_whitelist$MinSupport)
-        idx2 <- (putative_fusion$chr2 == df_whitelist$Chr & 
-                      putative_fusion$end >= df_whitelist$Start & 
-                      putative_fusion$end <= df_whitelist$End & 
-                      putative_fusion$nSupport >= df_whitelist$MinSupport)
-        t1 <-which(idx1)[1] 
-        t2 <-which(idx2)[1] 
-        # df_putative_fusions[n,"start"] <- ifelse(sum(idx1)>0,t1,0)
-        # df_putative_fusions[n,"end"] <- ifelse(sum(idx2)>0,t2,0)
-        if( sum(idx1) > 0 && sum(idx2) > 0 ) {
-          partners <- as.vector(df_whitelist[t1,"ID"])
-          if(sum(partners == as.vector(df_whitelist[t2,"ID"]))) {
-            df_putative_fusions[n,"whiteListed"] <- TRUE
-            df_putative_fusions[n,"name"] <- paste0(
-              "t(",
-                putative_fusion$chr,";",putative_fusion$chr2,
-              ") ",
-              "(",
-                df_whitelist[t1,"Arm"],df_whitelist[t1,"Band"],";",
-                df_whitelist[t2,"Arm"],df_whitelist[t2,"Band"],
-              ") ",
-              df_whitelist[t1,"Arm"],df_whitelist[t1,"Gene"]," / ",
-              df_whitelist[t2,"Arm"],df_whitelist[t2,"Gene"]
-            ) # paste
+      colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",  "end",	"sameStrand",	"nSupport","BreakPoint1_GoUp","BreakPoint2_GoUp")[1:ncol(df_putative_fusions)]
+      if(nrow(df_putative_fusions) > 0) {
+        rownames(df_putative_fusions) <- df_putative_fusions$ID
+        df_putative_fusions$idx1 <- 0
+        df_putative_fusions$idx2 <- 0
+        df_putative_fusions$whiteListed <- FALSE
+        df_putative_fusions$name <- ""
+        for (n in 1:nrow(df_putative_fusions)) {
+          putative_fusion <- df_putative_fusions[n,]
+          idx1 <- (putative_fusion$chr == df_whitelist$Chr & 
+                     putative_fusion$start >= df_whitelist$Start & 
+                     putative_fusion$start <= df_whitelist$End & 
+                     putative_fusion$nSupport >= df_whitelist$MinSupport)
+          idx2 <- (putative_fusion$chr2 == df_whitelist$Chr & 
+                        putative_fusion$end >= df_whitelist$Start & 
+                        putative_fusion$end <= df_whitelist$End & 
+                        putative_fusion$nSupport >= df_whitelist$MinSupport)
+          t1 <-which(idx1)[1] 
+          t2 <-which(idx2)[1] 
+          # df_putative_fusions[n,"start"] <- ifelse(sum(idx1)>0,t1,0)
+          # df_putative_fusions[n,"end"] <- ifelse(sum(idx2)>0,t2,0)
+          if( sum(idx1) > 0 && sum(idx2) > 0 ) {
+            partners <- as.vector(df_whitelist[t1,"ID"])
+            if(sum(partners == as.vector(df_whitelist[t2,"ID"]))) {
+              df_putative_fusions[n,"whiteListed"] <- TRUE
+              df_putative_fusions[n,"name"] <- paste0(
+                "t(",
+                  putative_fusion$chr,";",putative_fusion$chr2,
+                ") ",
+                "(",
+                  df_whitelist[t1,"Arm"],df_whitelist[t1,"Band"],";",
+                  df_whitelist[t2,"Arm"],df_whitelist[t2,"Band"],
+                ") ",
+                df_whitelist[t1,"Arm"],df_whitelist[t1,"Gene"]," / ",
+                df_whitelist[t2,"Arm"],df_whitelist[t2,"Gene"]
+              ) # paste
+            }
           }
-        }
-      } #for
-      # df_fusions <- df_putative_fusions[df_putative_fusions$WhiteListed,]
-      df_fusions <- df_putative_fusions
-      if(sum(grepl("^chr",df_fusions$chr)) ==0) { df_fusions$chr  <- paste0("chr",df_fusions$chr ) }
-      if(sum(grepl("^chr",df_fusions$chr2))==0) { df_fusions$chr2 <- paste0("chr",df_fusions$chr2) }
+        } #for
+        # df_fusions <- df_putative_fusions[df_putative_fusions$WhiteListed,]
+        df_fusions <- df_putative_fusions
+        if(sum(grepl("^chr",df_fusions$chr)) ==0) { df_fusions$chr  <- paste0("chr",df_fusions$chr ) }
+        if(sum(grepl("^chr",df_fusions$chr2))==0) { df_fusions$chr2 <- paste0("chr",df_fusions$chr2) }
+      } else {
+        df_fusions <- df_putative_fusions
+      } # if no rows
       write.table(df_fusions,fusions_path,row.names=FALSE,col.names=TRUE,quote = FALSE,sep="\t")
       file_remove_lock(fusions_path)
     } else {
