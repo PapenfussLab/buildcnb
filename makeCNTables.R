@@ -1,38 +1,82 @@
 #!/usr/bin/env Rscript
-#!/usr/bin/Rscript --vanilla
+#!/usr/bin/Rscript --vanilla # ideally, but how to?
 args <- commandArgs(TRUE)
-# 
-# setwd("~/mm/cnv/buildcnb") # For testing
+
+######################################### 
+# Global config defaults
+######################################### 
+CFG_DEFAULTS <- list(
+  rsubread_version = "1.24.0", # Currently preferred version
+  require_subread_version = TRUE, # break if the right one isn't used
+  use_own_subread = TRUE, # look in ./lib/ for subread package
+  rstudio_debug = FALSE,
+  debug = FALSE,
+  is_command_line = TRUE,
+  spawn_external_aligner = TRUE, # execute external aligner using system2() ?
+  wg_coarse_bin_size = 1000000,
+  wg_medium_bin_size = 50000,
+  wg_fine_bin_size = 5000,
+  targeted_bin_size = 119, # supplied in the bed file, but for me it's about the bait size
+  cbs_alpha = 0.01,
+  cbs_nperm = 10000,
+  loess_scales_badly_limit  = 100000, # when loess gets slow
+  loess_min_usable_counts  = 50, # For fitting
+  loess_min_usable_gc  = 0.25, 
+  loess_span = 0.4,
+  loess_bin_width = 0.01,
+  minimum_overlap = 1, 
+  norm_cutoff = 10,   # Counts in a bin less that this are thrown away for normalisation
+  median_norm_cutoff = 10,   # Counts in a bin with a dist whose median less that this are thrown away for ALL normalisation
+  mode_norm_cutoff = 100,   # Counts in a bin with a dist whose mode less that this are thrown away for mode-based normalisation
+  max_proportion_zero_entries = 0.5, # If more than this proportion of counts is less that the cutoff, something is wrong.
+  median_data_points_cutoff = 3,
+  median_magic = 0.2, # Magic number.   mode_norm_cutoff = efault is for targeted coverage in the hundreds. For lower coverage, use 0.2 * median
+  mode_data_points_cutoff = 3,
+  maximum_female_y_on_auto_ratio = 0.125,
+  minimum_female_x_on_auto_ratio = 0.75,
+  minimum_samples_for_sex_determination_by_clustering = 16,
+  counts_cutoff = 10,   # Counts less that this are thrown away for CN estimation
+  snp_min_mismatches = 1,    # Before a SNP is called 
+  snp_min_reads = 20,        # Before a SNP is called - these two also give the min B-allele freq
+  snp_max_reads = 1000,   # For PCR artifacts # TODO: Change for RNA-seq
+  segment_verbosity  = 0,
+  fusion_section = "targeted",
+  baf_section = "targeted",
+  vcf_section = "targeted",
+  del_section = "wg_medium",
+  del_zscore_section = "targeted",
+  use_paired_end = TRUE,
+  minimum_overlap = 70,
+  normalisation_statistic = "median",
+  baf_merge_distance = 1e4,
+  baf_max_rows = 4e5, 
+  baf_max_merge_iterations = 100,
+  enforce_matched_reference = TRUE,
+  minimum_hist_bins = 100,
+  cluster_type = "FORK"
+)
+
+# Try and figure out if we are being debugged in Rstudio
 # debugSource('~/mm/cnv/buildcnb/makeCNTables.R', echo=TRUE)
-# RSUBREAD_VERSION <- "1.23.5" # My hacked one based on 1.23.4
-RSUBREAD_VERSION <- "1.24.0" # Latest stable
+CFG_DEFAULTS$rstudio_debug <- (length(args)==0)
+if(CFG_DEFAULTS$rstudio_debug){ args <- "test.dcf" }
+CFG_DEFAULTS$is_command_line <- !CFG_DEFAULTS$rstudio_debug && length(args)>0 && args[1]!="RStudio" &&  !grepl("R$",args) 
 
-# USE_OWN_RSUBREAD <- TRUE
-USE_OWN_RSUBREAD <- FALSE
-
-# RSTUDIO_DEBUG <- TRUE
-RSTUDIO_DEBUG <- (length(args)==0)
-DEBUG <- FALSE
-
-if(RSTUDIO_DEBUG){ args <- if(RSTUDIO_DEBUG){ args <- "PanHaem_v1.1/160330_NS500817_0055_AH27FYBGXY/PanHaem_v1.1_160330_NS500817_0055_AH27FYBGXY.dcf" } }
-if(RSTUDIO_DEBUG){ args <- if(RSTUDIO_DEBUG){ args <- "test.dcf" } }
-
-isCommandLine <- !RSTUDIO_DEBUG && length(args)>0 && args[1]!="RStudio" &&  !grepl("R$",args) 
-
-if(length(args)!=1 && isCommandLine) {
+# Wrong use from command line
+if(length(args)!=1 && CFG_DEFAULTS$is_command_line) {
   print("Builds files for cnb. Usage: makeCNTables.R /path/to/config_dcf")
   quit(save = "no", status = 0)
 } 
 
-# Load my hacked version of Rsubread.
-if(RSTUDIO_DEBUG==FALSE && USE_OWN_RSUBREAD==TRUE) {
+# Load a version of Rsubread - possibly modified
+if(CFG_DEFAULTS$use_own_subread==TRUE) {
   library(devtools)
-  load_all(file.path(getwd(),paste0("lib/Rsubread_",RSUBREAD_VERSION)))
-  .libPaths(c("./lib/",.libPaths())) 
+  load_all(file.path(getwd(),paste0("lib/Rsubread_",CFG_DEFAULTS$rsubread_version)))
+  .libPaths(c("/pathology/NGS/Gaffa/gaffa/lib/",.libPaths()))
 } else {
   library(Rsubread)
 }
-
+# Silently load other libraries
 libnames <- c(
   "matrixStats",
   "plyr",
@@ -42,17 +86,21 @@ libnames <- c(
   "Biostrings",
   "rtracklayer",
   "ggplot2",
+  "ggrepel",
   "VariantAnnotation",
   "DNAcopy",
   "Hmisc",
   "modeest",
   "R.utils",
-  "corrplot"
-  )
+  "corrplot",
+  "doParallel",
+  "foreach"
+)
 for (libname in libnames) { 
   suppressPackageStartupMessages(library(libname,character.only=TRUE,warn.conflicts=FALSE,quietly=TRUE))
 }
 
+# As part of a shiny app, these functions and globals exist already
 if(!exists("gv")) {
   session <- NULL
   gv <- list()
@@ -61,48 +109,14 @@ if(!exists("gv")) {
   isolate <- function (f) { return (f)}
 } # For stand-alone
 
-# Some globals
-SPAWN_EXTERNAL_ALIGNER <- TRUE # execute external aligner using system2() ?
-WG_COARSE_BIN_SIZE <- 1000000
-WG_MEDIUM_BIN_SIZE <- 50000
-WG_SMALL_BIN_SIZE <- 5000
-TARGETED_BIN_SIZE <- 119 # supplied in the bed file, but for me it's about the bait size
-CBS_ALPHA = 0.01
-CBS_NPERM = 10000
-LOESS_SCALES_BADLY_LIMIT  <- 100000 # when loess gets slow
-LOESS_MIN_USABLE_COUNTS  <- 50 # For fitting
-LOESS_MIN_USABLE_GC  <- 0.25 
-LOESS_SPAN <- 0.4
-LOESS_BIN_WIDTH <- 0.01
-MINIMUM_OVERLAP <- 70 
-NORM_CUTOFF <- 10   # Counts in a bin less that this are thrown away for normalisation
-MEDIAN_NORM_CUTOFF <- 10   # Counts in a bin with a dist whose median less that this are thrown away for ALL normalisation
-MODE_NORM_CUTOFF <- 100   # Counts in a bin with a dist whose mode less that this are thrown away for mode-based normalisation
-MAX_PROPORTION_ZERO_ENTRIES <- 0.5 # If more than this proportion of counts is less that the cutoff, something is wrong.
-MEDIAN_DATA_POINTS_CUTOFF <- 3
-MEDIAN_MAGIC <- 0.2 # Magic number. MODE_NORM_CUTOFF default is for targeted coverage in the hundreds. For lower coverage, use 0.2 * median
-MODE_DATA_POINTS_CUTOFF <- 3
-MAXIMUM_FEMALE_Y_ON_AUTO_RATIO <- 0.125
-MINIMUM_FEMALE_X_ON_AUTO_RATIO <- 0.75
-MINIMUM_SAMPLES_FOR_SEX_DETERMINATION_BY_CLUSTERING <- 16
-COUNTS_CUTOFF <- 10   # Counts less that this are thrown away for CN estimation
-SNP_MIN_MISMATCHES <- 1    # Before a SNP is called 
-SNP_MIN_READS <- 20        # Before a SNP is called - these two also give the min B-allele freq
-SNP_MAX_READS <- 1000   # For PCR artifacts
-SEGMENT_VERBOSITY  <- 0
-FUSION_SECTION <- "targeted"
-BAF_SECTION <- "targeted"
-VCF_SECTION <- "targeted"
-DEL_SECTION <- "wg_medium"
-DEL_ZSCORE_SECTION <- "targeted"
-
+# Initialise global constants
 CFG <- list()
 DF_CFG <- data.frame()
 SAMPLES <- list()
 DF_BEDTYPE2BAMTYPE <- data.frame(bamtypes =c ("wg","wg","wg","targeted","targeted"), 
                            bedtypes = c("wg_coarse","wg_fine","wg_medium","targeted","off_target"),
                            bedfilename = c("wg_coarse_bedfile","wg_fine_bedfile","wg_medium_bedfile","targeted_bedfile","off_target_bedfile"),
-                           binsize = c(WG_COARSE_BIN_SIZE,WG_SMALL_BIN_SIZE,WG_MEDIUM_BIN_SIZE,TARGETED_BIN_SIZE,TARGETED_BIN_SIZE),
+                           binsize = c(CFG_DEFAULTS$wg_coarse_bin_size,CFG_DEFAULTS$wg_fine_bin_size,CFG_DEFAULTS$wg_medium_bin_size,CFG_DEFAULTS$targeted_bin_size,CFG_DEFAULTS$targeted_bin_size),
                            stringsAsFactors=FALSE)
 DF_FILETYPES <- data.frame(
   filetype = c("alias","bin","gc_table","reference","bam","count","references_for_bedtype","corrected_count","vcf","baf","deletion","deletions_zscore","translocation","infile"),
@@ -120,21 +134,24 @@ BEDFILENAMES <- DF_BEDTYPE2BAMTYPE$bedfilename
 names(BEDFILENAMES) <- BEDTYPES
 BEDFILENAME2BEDTYPE <- DF_BEDTYPE2BAMTYPE$bedtypes
 names(BEDFILENAME2BEDTYPE) <- BEDFILENAMES
-
+# Report package use
 df_ip <- (installed.packages())
 Rsubread_base_version <- df_ip["Rsubread","Version"]
 Rsubread_version <- sessionInfo()$otherPkgs$Rsubread$Version
-if(RSTUDIO_DEBUG) { gv$log <- paste0(isolate(gv$log),flog.info("Found RSubread version: %s Installed base version: %s",Rsubread_version,Rsubread_base_version)) }
+gv$log <- paste0(isolate(gv$log),flog.info("Found RSubread version: %s Installed base version: %s",Rsubread_version,Rsubread_base_version))
+
+if(CFG_DEFAULTS$require_subread_version==TRUE && CFG_DEFAULTS$rsubread_version!=Rsubread_version) { 
+  gv$log <- paste0(isolate(gv$log),flog.error("Found RSubread version: %s but require %s",Rsubread_version,CFG_DEFAULTS$rsubread_version))
+  return(2)
+}
 
 
 # -------------------------------------------------------------------
 makeCNTables <- function(configFileName) {
-
   # This makes all the tables that the CN browser needs
   if(!exists("gv")) {
     flog.info("Running makeCNTables() stand-alone with config file: %s",configFileName)
   } # For stand-alone
-
   df_cfg <- ftry(read.dcf(configFileName))
   if(length(df_cfg)==1) {
     gv$log <<- paste0(isolate(gv$log),flog.error("Unable to read config file: %s",configFileName))
@@ -157,16 +174,19 @@ makeCNTables <- function(configFileName) {
   CFG <<-  as.list(df_cfg$value)
   names(CFG) <<- df_cfg$name
   CFG[CFG=="TRUE"] <<- TRUE
-  CFG[CFG=="FALSE"] <<- FALSE  
+  CFG[CFG=="FALSE"] <<- FALSE 
+  CFG <<- add_defaults(CFG) # Add entries from CFG_DEFAULTS that are not in CFG
   SAMPLES <<- makesamplelist(df_cfg)
   if(length(SAMPLES)==0) { return (FALSE)}
-  LOG_FILE <- gsub(".t.[tv]$",".log",CFG$input_file)  
-  USED_PACKAGES_FILE <- gsub(".t.[tv]$",".used_packages.log",CFG$input_file)  
+  logfile <- gsub(".t.[tv]$",".log",CFG$input_file)  
+  used_packages_file <- gsub(".t.[tv]$",".used_packages.log",CFG$input_file)  
   # No more modification of globals after this point
   gv$log <<- paste0(isolate(gv$log),"\n",sessionInfo())
-  gv$log <<- paste0(isolate(gv$log),flog.info("Writing installed packages list to %s",USED_PACKAGES_FILE))
-  write.table(installed.packages(),USED_PACKAGES_FILE,sep="\t",quote = FALSE)
-  
+  gv$log <<- paste0(isolate(gv$log),flog.info("Writing installed packages list to %s",used_packages_file))
+  write.table(installed.packages(),used_packages_file,sep="\t",quote = FALSE)
+  #########################################################################################
+  # Main loop. Outer loop over file type (and possible resolution), inner loop over samples
+  #########################################################################################
   df_table <- NULL
   make_what <- strsplit(CFG$make_what,",")[[1]]
   df_filetypes <- DF_FILETYPES[DF_FILETYPES$filetype %in% make_what,]
@@ -182,7 +202,7 @@ makeCNTables <- function(configFileName) {
     }	
     df_table <- rbind.fill(df_table,df_something)
   }
-  write.table(gv$log,LOG_FILE,row.names = FALSE,col.names=FALSE,quote=FALSE)
+  write.table(gv$log,logfile,row.names = FALSE,col.names=FALSE,quote=FALSE)
   return(0)
 }
 # -------------------------------------------------------------------
@@ -234,6 +254,18 @@ isURL <- function(s) { return(grepl("^https://",s) | grepl("^http://",s) | grepl
 
 # -------------------------------------------------------------------
 hasPath <- function(s) { return(grepl("/",s)) }
+# -------------------------------------------------------------------
+
+# -------------------------------------------------------------------
+add_defaults  <- function (cfg) {
+  for (f in names(CFG_DEFAULTS)) {
+    if(is.null(cfg[[f]])) {
+      gv$log <<- paste0(isolate(gv$log),flog.info("Adding default config entry %s = %s.",f,CFG_DEFAULTS[f]))
+      cfg[f] <- CFG_DEFAULTS[f]
+    }
+  }
+  return(cfg)
+}
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
@@ -325,8 +357,7 @@ makepath <- function(panel = NULL,
     gv$log <<- paste0(isolate(gv$log),flog.info("Making %s for %s",path_to_file,ret))
     dir.create(path_to_file, recursive = TRUE)
   }
-  gv$log <<- paste0(isolate(gv$log),flog.info("%s / %s / %s / %s / %s / %s",panel,run,sample,per_sample_root_path,filetype,ret))
- 
+  # gv$log <<- paste0(isolate(gv$log),flog.info("%s+%s+%s+%s+%s=%s",panel,run,sample,per_sample_root_path,filetype,ret))
   return(ret)
 }
 # -------------------------------------------------------------------
@@ -567,11 +598,14 @@ write_corrected_counts <- function(sample,bedfile,do_what) {
     name = sample,
     is_wgs = ifelse(bam_type=="wg",TRUE,FALSE),
     is_targeted = ifelse(bam_type=="targeted",TRUE,FALSE),
+    run = CFG$run_path,
+    panel = CFG$panel_path,
     sample = sample,
     sex = "unknown",
     tumour_normal = "unknown",
     sample_type = "unknown",
     stringsAsFactors = FALSE)
+  
   if(do_what=="counts") {
     df_reference_file_list <- NULL
   } else { # For corrected counts, attempt to find out sex etc
@@ -616,13 +650,13 @@ write_corrected_counts <- function(sample,bedfile,do_what) {
     setwd(dirname(bampath))
     if(Rsubread_version=="1.16.1") {
       fc <- featureCounts(files=bamfile,
-                          isPairedEnd=TRUE,
+                          isPairedEnd=CFG$use_paired_end,
                           annot.ext=annotationpath,
                           nthreads = number_of_cores,
                           useMetaFeatures = TRUE,
                           ignoreDup = FALSE, # may or may not be what you want
                           countMultiMappingReads = TRUE,
-                          minReadOverlap = MINIMUM_OVERLAP,
+                          minReadOverlap = CFG$minimum_overlap,
                           requireBothEndsMapped = FALSE,
                           allowMultiOverlap = TRUE,
                           fraction = TRUE,
@@ -630,12 +664,12 @@ write_corrected_counts <- function(sample,bedfile,do_what) {
     }
     else {
       fc <- featureCounts(files=bamfile,
-                          isPairedEnd=TRUE,
+                          isPairedEnd=CFG$use_paired_end,
                           annot.ext=annotationpath,
                           nthreads = number_of_cores,
                           useMetaFeatures = TRUE,
                           largestOverlap = TRUE,
-                          minOverlap = MINIMUM_OVERLAP,
+                          minOverlap = 70,
                           fraction = TRUE,     
                           ignoreDup = FALSE, # may or may not be what you want
                           countMultiMappingReads = TRUE,
@@ -672,7 +706,7 @@ write_corrected_counts <- function(sample,bedfile,do_what) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Making GC correction for: %s",outpath))
     df_bedfile <- read.table(bedpath,header=FALSE,stringsAsFactors=FALSE)
     colnames(df_bedfile) <- c('chr','start','end','id','score')
-    if(nrow(df_bedfile)>LOESS_SCALES_BADLY_LIMIT) {
+    if(nrow(df_bedfile)>CFG$loess_scales_badly_limit) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Bedfile %s has %d entries so this could take some time",bedpath,nrow(df_bedfile)))
     }
     gc_path <- bedrow2gcrow(bedfile)$value
@@ -693,7 +727,7 @@ write_corrected_counts <- function(sample,bedfile,do_what) {
     binSize <- df_gc$end - df_gc$start + 1
     binCorrection <- median(binSize) / binSize
     df_gc$counts  <- binCorrection * df_gc$counts
-    idx_gc_fit <- df_gc$counts>LOESS_MIN_USABLE_COUNTS & df_gc$gc>LOESS_MIN_USABLE_GC
+    idx_gc_fit <- df_gc$counts>CFG$loess_min_usable_counts & df_gc$gc>CFG$loess_min_usable_gc
     # Mask points in black list
     if(!is.na(CFG$gc_fitting_blacklist)) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Reading GC blacklist"))    
@@ -706,7 +740,7 @@ write_corrected_counts <- function(sample,bedfile,do_what) {
     df_gc_fit <- df_gc[idx_gc_fit,]
     
     loess_predict <- tryCatch(
-      loess(counts ~ gc, data = df_gc_fit,  span = LOESS_SPAN),
+      loess(counts ~ gc, data = df_gc_fit,  span = CFG$loess_span),
       error=function(cond) { 
         message("Loess failed:") 
         gv$log <<- paste0(isolate(gv$log),flog.warn("Loess failed: %s",cond))
@@ -760,14 +794,29 @@ write_corrected_counts <- function(sample,bedfile,do_what) {
       gv$broken <<- TRUE 
       return (NULL)
     }
-    
+    if(CFG$enforce_matched_reference == TRUE) {
+      sex_idx <- (grepl("Female",names(references)) & grepl("Female",df_cnb$sex)) | (grepl("Male",names(references)) & grepl("Male",df_cnb$sex))
+      tumour_normal_idx <- (grepl("Tumour",names(references)) & grepl("Tumour",df_cnb$tumour_normal)) | (grepl("Normal",names(references)) & grepl("Normal",df_cnb$tumour_normal))
+      sample_type_idx <- (grepl("Fresh",names(references)) & grepl("Fresh",df_cnb$sample_type)) | (grepl("FFPE",names(references)) & grepl("FFPE",df_cnb$sample_type))
+      idx <- sex_idx & tumour_normal_idx & sample_type_idx
+      if(sum(idx)==0) {
+        idx <- sex_idx & tumour_normal_idx
+      }
+      if(sum(idx)==0) {
+        idx <- sex_idx
+      }
+      if(sum(idx)!=0) {
+        gv$log <<- paste0(isolate(gv$log),flog.info("Enforcing a choice of %d from %d references",sum(idx),length(references)))
+        references <- references[idx]
+      }
+    }
     bestReference <- findBestReference(references,df)
     gv$log <<- paste0(isolate(gv$log),flog.info("Writing GC corrected counts: %s",outpath))
     ftry(write.table(bestReference$corrected,outpath,row.names=FALSE,sep="\t",quote = FALSE))
     
     # Write out the loess correction across the range of GC values
-    bins <- seq(0, 1, by = LOESS_BIN_WIDTH)
-    fapply_median <- function(n,bins) { median(df_gc_fit$counts[df_gc_fit$gc>=(bins[n] - LOESS_BIN_WIDTH) & df_gc_fit$gc<(bins[n] + LOESS_BIN_WIDTH)]) }
+    bins <- seq(0, 1, by = CFG$loess_bin_width)
+    fapply_median <- function(n,bins) { median(df_gc_fit$counts[df_gc_fit$gc>=(bins[n] - CFG$loess_bin_width) & df_gc_fit$gc<(bins[n] + CFG$loess_bin_width)]) }
     bin_medians <- unlist(lapply(1:length(bins),fapply_median,bins))
     loessCorrection_df <- data.frame(gc = bins, median = bin_medians)
     loessCorrection_df$bam <-  sample
@@ -860,8 +909,8 @@ make_references_for_bedtypes = function (bedtype) {
   min_reference_samples <- CFG$min_reference_samples
   gv$log <<- paste0(isolate(gv$log),flog.info("Successfully read reference_file_list file: %s with %d samples",
                                              reference_file_list_file_name,num_samples))
-  if(grepl(DEL_ZSCORE_SECTION,bedtype)==TRUE) {
-  make_deletions_stats(TRUE,df_reference_file_list$CountsPath,bedtype)
+  if(grepl(CFG$del_zscore_section,bedtype)==TRUE) {
+    make_deletions_stats(TRUE,df_reference_file_list$CountsPath,bedtype)
   }
   
   criteria <-  DF_CFG[grepl("params",DF_CFG$section) & grepl("reference_variables",DF_CFG$name),"value"]
@@ -1021,12 +1070,17 @@ makeReference = function (df_reference_file_list,reference_file_name,df_gc) {
   df_counts <- df_counts[,col_idx]
   gv$log <<- paste0(isolate(gv$log),flog.info("Calculating references"))
   if(nrow(df_gc) != nrow(df_counts)) {
-    gv$log <<- paste0(isolate(gv$log),flog.error("GC file differs in rows to counts table: %d vs %s",nrow(df_gc),nrow(df_counts)))
+    gv$log <<- paste0(isolate(gv$log),flog.error("GC file differs in rows to counts table: %d vs %d",nrow(df_gc),nrow(df_counts)))
     return(NULL)
   }
 
+  if(sum(colSums(df_counts)==0)>0) {
+    gv$log <<- paste0(isolate(gv$log),flog.error("%d of the counts table cols is zero:",sum(colSums(df_counts)>0)))
+    print(colSums(df_counts)==0)
+    return(NULL)
+  }
   if(nrow(df_reference_file_list) != ncol(df_counts)) {
-    gv$log <<- paste0(isolate(gv$log),flog.error("Reference list differs in rows to counts table cols: %d vs %s",nrow(df_reference_file_list),ncol(df_counts)))
+    gv$log <<- paste0(isolate(gv$log),flog.error("Reference list differs in rows to counts table cols: %d vs %d",nrow(df_reference_file_list),ncol(df_counts)))
     print(df_reference_file_list$SampleName)
     print(colnames(df_counts))
     print(paste0(df_reference_file_list$SampleName,sep='',collapse='|'))
@@ -1041,11 +1095,19 @@ makeReference = function (df_reference_file_list,reference_file_name,df_gc) {
   x_idx <- grepl("X",df_gc$chr)
   y_idx <- grepl("Y",df_gc$chr)
   auto_idx <- (!(x_idx | y_idx))
-  threshold_idx <- (rowSums(df_counts >= NORM_CUTOFF & (!is.na(df_counts)))==ncol(df_counts))
+  threshold_idx <- (rowSums(df_counts >= CFG$norm_cutoff & (!is.na(df_counts)))==ncol(df_counts))
   have_sex <- FALSE
-  
+  if(sum(threshold_idx)==0) {
+    gv$log <<- paste0(isolate(gv$log),flog.info("No bin coud be found with enough counts across all samples."))
+    gv$log <<- paste0(isolate(gv$log),flog.info("Printing number of samples with no counts for each bin:"))
+    print(rowSums(df_counts==0,na.rm=TRUE))
+    gv$log <<- paste0(isolate(gv$log),flog.info("Number of good columns by row:"))
+    print(rowSums(df_counts >= CFG$norm_cutoff & (!is.na(df_counts))))
+    return(NULL)
+  }
   if(sum("Sex"==colnames(df_reference_file_list))==1) {
     female_idx <- grepl("Female",df_reference_file_list$Sex)
+    male_idx <- grepl("Male",df_reference_file_list$Sex)
     df_reference_file_list$Sex[female_idx] <- "Female"
     gv$log <<- paste0(isolate(gv$log),flog.info("From table: Males:Females = %d:%d",sum(!female_idx),sum(female_idx)))
     have_sex <- TRUE
@@ -1067,15 +1129,15 @@ makeReference = function (df_reference_file_list,reference_file_name,df_gc) {
   x_ratio <- x_medians / auto_medians
   y_ratio <- y_medians / auto_medians
   
-  male_idx <- (y_ratio > MAXIMUM_FEMALE_Y_ON_AUTO_RATIO) | (x_ratio < MINIMUM_FEMALE_X_ON_AUTO_RATIO)
-  female_idx <- !male_idx
+  male_idx_counts <- (y_ratio > CFG$maximum_female_y_on_auto_ratio) | (x_ratio < CFG$minimum_female_x_on_auto_ratio)
+  female_idx_counts <- !male_idx
   if(!have_sex) { 
     gv$log <<- paste0(isolate(gv$log),flog.warn("Setting sex from thresholding median Y/autosome coverage."))
-    df_reference_file_list$Sex <- ifelse(female_idx,"Female","Male") 
+    df_reference_file_list$Sex <- ifelse(female_idx_counts,"Female","Male") 
   }
   gv$log <<- paste0(isolate(gv$log),
                     flog.info("From counts: Males:Females:NA = %d:%d:%d",
-                              sum(!female_idx,na.rm=TRUE),sum(female_idx,na.rm=TRUE),sum(is.na(female_idx))
+                              sum(!female_idx_counts,na.rm=TRUE),sum(female_idx_counts,na.rm=TRUE),sum(is.na(female_idx_counts))
                               )
                     )
   
@@ -1085,11 +1147,11 @@ makeReference = function (df_reference_file_list,reference_file_name,df_gc) {
                    AUTO = auto_medians, 
                    X_ON_AUTO = x_ratio,
                    Y_ON_AUTO = y_ratio,
-                   COUNTS = ifelse(female_idx,"Female","Male"),
+                   COUNTS = ifelse(female_idx_counts,"Female","Male"),
                    TABLE = df_reference_file_list$Sex
   ))
   
-  if(length(x_ratio)<=MINIMUM_SAMPLES_FOR_SEX_DETERMINATION_BY_CLUSTERING) {
+  if(length(x_ratio)<=CFG$minimum_samples_for_sex_determination_by_clustering) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Guessing sex from clustering."))
     sex <- kmeans(x_ratio,2)
     female_idx_from_clustering <- sex$cluster==2
@@ -1097,11 +1159,11 @@ makeReference = function (df_reference_file_list,reference_file_name,df_gc) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Cluster sex-labels swapped"))
       female_idx_from_clustering <- !female_idx_from_clustering 
     } 
-    if(sum(female_idx_from_clustering) > 0 &&  mean(y_ratio[female_idx_from_clustering],na.rm=TRUE) > MAXIMUM_FEMALE_Y_ON_AUTO_RATIO) {
+    if(sum(female_idx_from_clustering) > 0 &&  mean(y_ratio[female_idx_from_clustering],na.rm=TRUE) > CFG$maximum_female_y_on_auto_ratio) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Both clusters same sex?"))
       # female_idx[female_idx] <- FALSE 
     } 
-    if(sum(female_idx_from_clustering) > 0 && mean(x_ratio[female_idx_from_clustering],na.rm=TRUE) < MINIMUM_FEMALE_X_ON_AUTO_RATIO) {
+    if(sum(female_idx_from_clustering) > 0 && mean(x_ratio[female_idx_from_clustering],na.rm=TRUE) < CFG$minimum_female_x_on_auto_ratio) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Both clusters same sex?"))
       # female_idx[!female_idx] <- TRUE
     } 
@@ -1110,23 +1172,25 @@ makeReference = function (df_reference_file_list,reference_file_name,df_gc) {
   }
   if(sum(x_idx)>0 && sum(y_idx)>0) {
     if(sum(!female_idx)>0) {
+      gv$log <<- paste0(isolate(gv$log),flog.info("Adjusting X and Y counts for %d samples",sum(!female_idx)))
       df_counts[x_idx,!female_idx] <- df_counts[x_idx,!female_idx] * 2
       df_counts[y_idx,!female_idx] <- df_counts[y_idx,!female_idx] * 2
     }
     if(sum(female_idx)>0) {
-      df_counts[y_idx,female_idx] <- 0
+      gv$log <<- paste0(isolate(gv$log),flog.info("Setting Y counts = NA for %d samples",sum(female_idx)))
+      df_counts[y_idx,female_idx] <- NA
     }
   }
   
   # Normalise the counts with the lower end of the dist truncated
   df_counts_with_na <- df_counts
-  df_counts_with_na[df_counts < NORM_CUTOFF] <- NA
+  df_counts_with_na[df_counts < CFG$norm_cutoff] <- NA
   
   sampleMedians <- colMedians(as.matrix(df_counts_with_na),na.rm=TRUE)
   ensembleMedian <- median(sampleMedians)
   # Counts median normalised 
   nc <- as.matrix(df_counts) %*% diag(ensembleMedian/sampleMedians) 
-  nc[df_counts < NORM_CUTOFF] <- NA
+  nc[df_counts < CFG$norm_cutoff] <- NA
   row_medians <- rowMedians(nc,na.rm=TRUE)
   df_counts <- data.frame(chr = df_gc$chr, 
                     start = df_gc$start, 
@@ -1296,47 +1360,54 @@ applyReference  <- function (ref_name,refs,df) {
     # return(NULL)
   } 
   
-  idx <- (!is.na(df$raw)) & (df$raw>=MEDIAN_NORM_CUTOFF) & (!df$blackListed)
-  if(sum(df$raw==0) > length(idx) * MAX_PROPORTION_ZERO_ENTRIES) {
+  idx <- (!is.na(df$raw)) & (df$raw>=CFG$median_norm_cutoff) & (!df$blackListed)
+  if(sum(df$raw==0) > length(idx) * CFG$max_proportion_zero_entries) {
     gv$log <<- paste0(isolate(gv$log),flog.warn("Failed to apply reference properly or bad sample? Too many counts entries are zero. Entries = %d, Zero Entries = %d, Usable Entries = %d",
                                                 length(idx),sum(idx),sum(df$raw==0)))
     # gv$broken <<- TRUE
     # return(NULL)
   } 
   
-  normalise_on_mode  <- FALSE
-  if(!is.null(CFG$normalisation_statistic) && CFG$normalisation_statistic=="mode") { normalise_on_mode  <- true } 
+  normalise_on_mode  <- ifelse(CFG$normalisation_statistic=="mode",TRUE,FALSE)
   
   # Median normalise truncated raw counts
-  idx <- (!is.na(df$raw)) & (df$raw>=MEDIAN_NORM_CUTOFF) & (!df$blackListed)
-  if(sum(df$raw==0) > length(idx) * MAX_PROPORTION_ZERO_ENTRIES) {
+  idx <- (!is.na(df$raw)) & (df$raw>=CFG$median_norm_cutoff) & (!df$blackListed)
+  if(sum(df$raw==0) > length(idx) * CFG$max_proportion_zero_entries) {
     gv$log <<- paste0(isolate(gv$log),flog.warn("Failed to apply reference properly or bad sample? Too many counts entries are zero. Something is wrong. Entries = %d, Zero Entries = %d, Usable Entries = %d",
          length(idx),sum(idx),sum(df$raw==0)))
     # gv$broken <<- TRUE
     # return(NULL)
   } 
   nc  <-  df$raw / median(df$raw[idx])
-  idx <- !is.na(df_reference$ref_median) & df_reference$ref_median>=MEDIAN_NORM_CUTOFF & !df$blackListed 
+  idx <- !is.na(df_reference$ref_median) & df_reference$ref_median>=CFG$median_norm_cutoff & !df$blackListed 
   nref  <-  df_reference$ref_median / median(df_reference$ref_median[idx])
   ratio <- nc / nref
-  idx <- !is.nan(ratio) & is.finite(ratio) & df$raw>=COUNTS_CUTOFF & df_reference$raw>=COUNTS_CUTOFF & !df$blackListed 
+  idx <- !is.nan(ratio) & is.finite(ratio) & df$raw>=CFG$counts_cutoff & df_reference$raw>=CFG$counts_cutoff & !df$blackListed 
   cor <- ratio
   cor[!idx] <- NA
   # Strip out divide by zero stuff for evaluating metrics
   ratio <- ratio[idx]
   nmax <- length(ratio)
   fom <- list()
-  if(sum(idx) < MEDIAN_DATA_POINTS_CUTOFF) {
-    gv$log <<- paste0(isolate(gv$log),flog.error("Unable to normalise. Only have %d points out of %d. Need at least %d to calculate median.",sum(idx),length(idx),MEDIAN_DATA_POINTS_CUTOFF))
+  if(sum(idx) < CFG$median_data_points_cutoff) {
+    gv$log <<- paste0(isolate(gv$log),flog.error("Unable to normalise. Only have %d points out of %d. Need at least %d to calculate median.",sum(idx),length(idx),CFG$median_data_points_cutoff))
     gv$broken <<- TRUE
     return(df)
   }
   cn_median <- median(cor[idx])
-  mode_norm_cutoff <- min(MEDIAN_MAGIC * cn_median,MODE_NORM_CUTOFF)
+  h <- hist(cor[idx],breaks=max(length(cor[idx])/100,CFG$minimum_hist_bins),plot=FALSE)
+  # rmax is index to the mode
+  rzero <- which.max(h$counts)
+  cs <- cumsum(h$density)
+  # rzero is the index to 1 percentile (hopefully past noise)
+  nupper <- nupper <- h$mids[which(cs>0.75)[1]]
+  hist_mode <- h$mids[rzero]
+
+  mode_norm_cutoff <- min(CFG$median_magic * cn_median,CFG$mode_norm_cutoff)
   cn_mode <- 0	
   idx_mode  <- idx & df$raw>mode_norm_cutoff & df_reference$raw>mode_norm_cutoff
-  if(sum(idx_mode) < MODE_DATA_POINTS_CUTOFF) {
-    gv$log <<- paste0(isolate(gv$log),flog.error("Unable to normalise. Only have %d points out of %d. Need at least %d bigger than %f to calculate mode.",sum(idx_mode),length(idx_mode),MODE_DATA_POINTS_CUTOFF,mode_norm_cutoff))
+  if(sum(idx_mode) < CFG$mode_data_points_cutoff) {
+    gv$log <<- paste0(isolate(gv$log),flog.error("Unable to normalise. Only have %d points out of %d. Need at least %d bigger than %f to calculate mode.",sum(idx_mode),length(idx_mode),CFG$mode_data_points_cutoff))
     gv$log <<- paste0(isolate(gv$log),flog.error("sample/ref= NA: %d / %d   zero_entries: %d / %d median: %f / %f mean: %f / %f max: %f / %f",
       sum(is.na(df$raw)),sum(is.na(df_reference$raw)),sum(df$raw==0,na.rm=TRUE),sum(df_reference$raw==0,na.rm=TRUE),median(df$raw,na.rm=TRUE),median(df_reference$raw,na.rm=TRUE),mean(df$raw,na.rm=TRUE),mean(df_reference$raw,na.rm=TRUE),max(df$raw,na.rm=TRUE),max(df_reference$raw,na.rm=TRUE)))
     gv$broken <<- TRUE
@@ -1359,7 +1430,7 @@ applyReference  <- function (ref_name,refs,df) {
 
   warn_norm <- (abs(cn_mode-cn_median)/(cn_mode+cn_median) > 0.1)
   if(warn_norm) { gv$log <<- paste0(isolate(gv$log),flog.info("##############################################"))}
-  gv$log <<- paste0(isolate(gv$log),flog.info("::Normalising %s: Mode = %e Median = %e",ref_name,cn_mode,cn_median))
+  gv$log <<- paste0(isolate(gv$log),flog.info("::Normalising %s: Mode = %e Median = %e UpperQuartile = %e ModeFromBins = %e",ref_name,cn_mode,cn_median,nupper,hist_mode))
   if(warn_norm) { gv$log <<- paste0(isolate(gv$log),flog.info("##############################################"))}
   cor <- cor / cn_mode
   N = cor * 2
@@ -1377,6 +1448,8 @@ applyReference  <- function (ref_name,refs,df) {
     df$ref_var <- df_reference$ref_var
     df$ref_sd <-df_reference$ref_sd
     df$ref_N <- df_reference$ref_N
+    df$nupper <- nupper
+    df$hist_mode <- hist_mode
   }
   else {
     # Flag error
@@ -1405,7 +1478,7 @@ do_cbc <- function (N,df_reference) {
   weights <- weights[idx]/sum(weights[idx])
   CNA.object <- CNA(log2(N[idx]),df_reference$chr[idx],df_reference$start[idx],data.type="logratio",presorted=TRUE)
   # smoothed.CNA.object <- smooth.CNA(CNA.object)
-  segment.CNA.object <- segment(x = CNA.object, verbose = SEGMENT_VERBOSITY,alpha = CBS_ALPHA, nperm = CBS_NPERM )
+  segment.CNA.object <- segment(x = CNA.object, verbose = CFG$segment_verbosity,alpha = CFG$cbs_alpha, nperm = CFG$cbs_nperm )
   numSegments <- nrow(segment.CNA.object$output)
   
   idx_na <- is.na(segment.CNA.object$segRows$startRow)
@@ -1426,7 +1499,7 @@ do_cbc <- function (N,df_reference) {
     endSeg   <- idx_conv[segment.CNA.object$segRows$endRow[i]]
     Ns[startSeg:endSeg] <- 2^(segment.CNA.object$output$seg.mean[i])
   }
-  df_seg <- segments.pval(segment.CNA.object,alpha = CBS_ALPHA, nperm = CBS_NPERM )
+  df_seg <- segments.pval(segment.CNA.object,alpha = CFG$cbs_alpha, nperm = CFG$cbs_nperm )
   colnames(df_seg) <- c("Gene","Chr","Start","End","Bins","log2N","bstat","pval","lcl","ucl")
   ret <- list(df_seg = df_seg, Ns = Ns, cna_output = segment.CNA.object)
   return(ret)
@@ -1456,8 +1529,8 @@ make_bams <- function(sample) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Need to join files matching %s (%d matches)",fastq_dir,length(fastqpaths)))
       fastqpaths[1] <-  paste0(sample,"_R1.fastq.gz")
       fastqpaths[2] <-  paste0(sample,"_R2.fastq.gz")
-    } else if (length(fastqpaths) < 2) {
-       gv$log <<- paste0(isolate(gv$log),flog.error("No matching fastq files in %s",fastq_dir))
+    } else if (length(fastqpaths) < 1) {
+       gv$log <<- paste0(isolate(gv$log),flog.error("Not enough matching fastq files in %s",fastq_dir))
        gv$broken <<- TRUE
        return(NULL)
     }
@@ -1470,23 +1543,32 @@ make_bams <- function(sample) {
     }
 
     if(!file.exists(fastqpaths[1]) || file.size(fastqpaths[1])<1) {
-        gv$log <<- paste0(isolate(gv$log),flog.info("fastq file not found or zero length: %s",fastqpaths[1]))
+        gv$log <<- paste0(isolate(gv$log),flog.warn("fastq file not found or zero length: %s",fastqpaths[1]))
         gv$broken <<- TRUE
         return(NULL)
+    } else {
+      fastqpaths1 <- fastqpaths[1]
     }
-    if(!file.exists(fastqpaths[2]) || file.size(fastqpaths[2])<1) {
-        gv$log <<- paste0(isolate(gv$log),flog.info("fastq file not found or zero length: %s",fastqpaths[2]))
-        gv$broken <<- TRUE
-        return(NULL)
+    if(!file.exists(fastqpaths[2]) || file.size(fastqpaths[2])<1000) {
+        gv$log <<- paste0(isolate(gv$log),flog.warn("fastq file not found or looks too short: %s",fastqpaths[2]))
+	fastqpaths2 <- NULL
+    } else {
+        fastqpaths2 <- fastqpaths[2]
     }
-    gv$log <<- paste0(isolate(gv$log),flog.info("Have %s and %s",fastqpaths[1],fastqpaths[2]))
+    gv$log <<- paste0(isolate(gv$log),flog.info("Have %s and %s",fastqpaths1,fastqpaths2))
     
-    if(SPAWN_EXTERNAL_ALIGNER) {
-      ret <- system2('subread-align',c('-i',chrom_index_file,'-r',fastqpaths[1],'-R',fastqpaths[2],'-o',basename(bampath),
-                                '-t','1','--sv','-T',number_of_cores,'-B',16))
+    if(CFG$spawn_external_aligner==TRUE) {
+      if(is.null(fastqpaths2)) {
+        ret <- system2('subread-align',c('-i',chrom_index_file,'-r',fastqpaths1,'-o',basename(bampath),
+                                  '-t','1','--sv','-T',number_of_cores,'-B',16))
+      } else {
+        ret <- system2('subread-align',c('-i',chrom_index_file,'-r',fastqpaths1,'-R',fastqpaths2,'-o',basename(bampath),
+                                  '-t','1','--sv','-T',number_of_cores,'-B',16))
+      }
     } else {
       align(chrom_index_file,
-            fastqpaths[1],fastqpaths[2],
+            fastqpaths1,
+            readfile2=fastqpaths2,
             type="dna",
             input_format="gzFASTQ",
             output_format="BAM",
@@ -1521,9 +1603,9 @@ make_vcfs <- function(sample) {
     sample = sample,
     path = "",
     file = "vcf",
-    resolution = VCF_SECTION,
-    is_targeted = (VCF_SECTION=="targeted"),
-    is_wgs = (VCF_SECTION=="targeted"),
+    resolution = CFG$vcf_section,
+    is_targeted = (CFG$vcf_section=="targeted"),
+    is_wgs = (CFG$vcf_section=="targeted"),
     stringsAsFactors = FALSE
     )
   bampath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "bam",extension = ".bam",df_cfg = DF_CFG)
@@ -1549,9 +1631,9 @@ make_vcfs <- function(sample) {
              outputFile=vcffile,
              # qvalueCutoff=12,
              # minAllelicFraction=0,
-             minAllelicBases=SNP_MIN_MISMATCHES,
-             minReads=SNP_MIN_READS,
-             maxReads=SNP_MAX_READS,
+             minAllelicBases=CFG$snp_min_mismatches,
+             minReads=CFG$snp_min_reads,
+             maxReads=CFG$snp_max_reads,
              # minBaseQuality=13,
              # nTrimmedBases=3,
              nthreads=number_of_cores)
@@ -1574,9 +1656,9 @@ make_bafs <- function(sample) {
   sample = sample,
   path = "",
   file = "baf",
-  resolution = BAF_SECTION,
-  is_targeted = (BAF_SECTION=="targeted"),
-  is_wgs = (BAF_SECTION=="targeted"),
+  resolution = CFG$baf_section,
+  is_targeted = (CFG$baf_section=="targeted"),
+  is_wgs = (CFG$baf_section=="targeted"),
   stringsAsFactors = FALSE
   )
   sample_idx <- grepl(sample,df_files$sample)
@@ -1587,9 +1669,11 @@ make_bafs <- function(sample) {
   df_files[sample_idx,"path"] <- bafpath
   
   if(!file_no_clobber(bafpath) && file_apply_lock(bafpath)) {
+    gv$log <<- paste0(isolate(gv$log),flog.info("Reading VCF file %s",vcfpath))   
     vcf <- readVcf(vcfpath,genome = "hg19")
     if(nrow(vcf)>0) {
       idx <- isSNV(vcf, singleAltOnly=FALSE)
+      gv$log <<- paste0(isolate(gv$log),flog.info("VCF file has %d entries and %d SNVs",nrow(vcf),sum(idx)))   
       snvinfo <- info(vcf[idx])
       df_baf <- data.frame(chr = paste0("chr",t(as.data.frame(strsplit(rownames(snvinfo),":")))[,1]), 
                            start = start(ranges(rowRanges(vcf[idx]))), 
@@ -1603,9 +1687,66 @@ make_bafs <- function(sample) {
       gv$log <<- paste0(isolate(gv$log),flog.warn("Empty VCF file. Writing a fake row."))    
       df_baf <- data.frame(chr = "MT", start = 1, end = 1, freq = 0, ref_reads = 0, alt_reads = 0,stringsAsFactors = FALSE)   
     }        
-    idx <- grepl("GL",df_baf$chr) | grepl("MT",df_baf$chr) | df_baf$alt_reads >= SNP_MAX_READS | df_baf$ref_reads >= SNP_MAX_READS 
+    idx <- grepl("GL",df_baf$chr) | grepl("MT",df_baf$chr) | df_baf$alt_reads >= CFG$snp_max_reads | df_baf$ref_reads >= CFG$snp_max_reads 
     df_baf <- df_baf[!idx,]
-    gv$log <<- paste0(isolate(gv$log),flog.info("Writing %s with %d entries",bafpath,sum(idx)))    
+    if(nrow(df_baf) > CFG$baf_max_rows) { gv$log <<- paste0(isolate(gv$log),flog.info("Have %d entries - need to merge some.",nrow(df_baf))) }
+    niter = 1
+    merge_distance <- CFG$baf_merge_distance
+    while (nrow(df_baf) > CFG$baf_max_rows && niter < CFG$baf_max_merge_iterations) {
+      df_baf$start_next <- 0
+      df_baf$end_next <- 0
+      df_baf$end_prev <- 0
+      df_baf$chr_next <- 0
+      df_baf$chr_prev <- 0
+      df_baf$alt_reads_next <- 0
+      df_baf$ref_reads_next <- 0
+      df_baf$freq_next <- 0
+      df_baf$merge_prev <- FALSE
+      df_baf$start_next[1:(nrow(df_baf)-1)] <- df_baf$start[2:(nrow(df_baf))]
+      df_baf$end_next[1:(nrow(df_baf)-1)] <- df_baf$end[2:(nrow(df_baf))]
+      df_baf$end_prev[2:(nrow(df_baf))] <- df_baf$end[1:(nrow(df_baf)-1)]
+      df_baf$chr_next[1:(nrow(df_baf)-1)] <- df_baf$chr[2:(nrow(df_baf))]
+      df_baf$chr_prev[2:(nrow(df_baf))] <- df_baf$chr[1:(nrow(df_baf)-1)]
+      df_baf$alt_reads_next[1:(nrow(df_baf)-1)] <- df_baf$alt_reads[2:(nrow(df_baf))]
+      df_baf$ref_reads_next[1:(nrow(df_baf)-1)] <- df_baf$ref_reads[2:(nrow(df_baf))]
+      df_baf$freq_next[1:(nrow(df_baf)-1)] <- df_baf$freq[2:(nrow(df_baf))]
+      # merge if the next one is close enough and the previous one is far enough
+      df_baf$merge_next <- ((df_baf$start_next-df_baf$end) <= merge_distance) & 
+        ((df_baf$start - df_baf$end_prev) > merge_distance) &
+        (df_baf$chr==df_baf$chr_next) & 
+        (df_baf$chr==df_baf$chr_prev)
+      df_baf$merge_prev[2:(nrow(df_baf))] <- df_baf$merge_next[1:(nrow(df_baf)-1)]
+      # Some of the SNVs being merged onto will be replaced with the read counts of the other SNV
+      # All will have their end co-ord replaced.
+      replace_with_next <- df_baf$merge_next & ((df_baf$ref_reads + df_baf$alt_reads) < (df_baf$ref_reads_next + df_baf$alt_reads_next))
+      df_baf$ref_reads[replace_with_next] <- df_baf$ref_reads_next[replace_with_next] 
+      df_baf$alt_reads[replace_with_next] <- df_baf$alt_reads_next[replace_with_next]
+      df_baf$freq[replace_with_next] <- df_baf$freq_next[replace_with_next]
+      df_baf$end[replace_with_next] <- df_baf$end_next[replace_with_next]
+      
+      df_baf_new <- df_baf[!df_baf$merge_prev,]
+      baf_len <- df_baf_new$end - df_baf_new$start
+      baf_len <- baf_len[!is.na(baf_len)]
+      merge_distance <- median(df_baf$start_next - df_baf$end,na.rm=T)
+      flog.info("Merging BAF table: iter = %d,  rows = %d -> %d, median_dist = %f, merge_dist = %f, median_length = %f, med(len!=0) = %f, N(len!=0) = %d",
+                niter,nrow(df_baf),nrow(df_baf_new),median(df_baf$start_next - df_baf$end,na.rm=T),merge_distance,median(baf_len,na.rm=T),median(baf_len[baf_len!=0],na.rm=T),sum(baf_len!=0,na.rm=T))
+      df_baf <- df_baf_new
+      df_baf$start_next <- NULL
+      df_baf$end_next <- NULL
+      df_baf$end_prev <- NULL
+      df_baf$chr_next <- NULL
+      df_baf$chr_prev <- NULL
+      df_baf$start_next <- NULL
+      df_baf$merge_next <- NULL
+      df_baf$merge_prev <- NULL
+      df_baf$alt_reads_next <- NULL
+      df_baf$ref_reads_next <- NULL
+      df_baf$freq_next <- NULL
+      niter = niter + 1
+    }
+    
+    
+    gv$log <<- paste0(isolate(gv$log),flog.info("Writing %s with %d entries",bafpath,nrow(df_baf)))    
     write.table(df_baf,bafpath,row.names=FALSE,quote = FALSE,sep="\t")
     file_remove_lock(bafpath)
   } else {
@@ -1623,17 +1764,17 @@ make_deletions <- function(sample) {
     sample = sample,
     path = "",
     file = "deletions",
-    resolution = DEL_SECTION,
-    is_targeted = (DEL_SECTION=="targeted"),
-    is_wgs = (DEL_SECTION=="targeted"),
+    resolution = CFG$del_section,
+    is_targeted = (CFG$del_section=="targeted"),
+    is_wgs = (CFG$del_section=="targeted"),
     stringsAsFactors = FALSE
   )
   
 
   sample_idx <- grepl(sample,df_files$sample)
-  delpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "sv",resolution = DEL_SECTION, extension = "_del.tsv",df_cfg = DF_CFG)
+  delpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "sv",resolution = CFG$del_section, extension = "_del.tsv",df_cfg = DF_CFG)
   delfile <- basename(delpath)
-  corrected_counts_path <- makepath(panel = CFG$panel,run = CFG$run_path,sample = sample,filetype = "cnv",resolution = DEL_SECTION, extension = ".tsv",df_cfg = DF_CFG)
+  corrected_counts_path <- makepath(panel = CFG$panel,run = CFG$run_path,sample = sample,filetype = "cnv",resolution = CFG$del_section, extension = ".tsv",df_cfg = DF_CFG)
   df_files[sample_idx,"path"] <- delpath
   if(!file_no_clobber(delpath) && file_apply_lock(delpath)) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Need: %s",delpath))
@@ -1756,9 +1897,9 @@ make_translocations <- function(sample) {
     sample = sample,
     path = "",
     file = "fusion",
-    resolution = FUSION_SECTION,
-    is_targeted = (FUSION_SECTION=="targeted"),
-    is_wgs = (FUSION_SECTION=="targeted"),
+    resolution = CFG$fusion_section,
+    is_targeted = (CFG$fusion_section=="targeted"),
+    is_wgs = (CFG$fusion_section=="targeted"),
     stringsAsFactors = FALSE
   )
   fusions_white_list <- CFG$fusions_white_list
@@ -1775,7 +1916,7 @@ make_translocations <- function(sample) {
   if(!file_no_clobber(fusions_path) && file_apply_lock(fusions_path)) {
     if(file.exists(putative_fusion_list)) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Reading %s",putative_fusion_list))
-      df_putative_fusions <- read.table(putative_fusion_list,header=TRUE,comment.char = "",stringsAsFactors=FALSE)
+      df_putative_fusions <- read.table(putative_fusion_list,header=TRUE,comment.char = "#",stringsAsFactors=FALSE)
       gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",fusions_path))
       # colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",  "end",	"sameStrand",	"nSupport")
       colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",  "end",	"sameStrand",	"nSupport","BreakPoint1_GoUp","BreakPoint2_GoUp")[1:ncol(df_putative_fusions)]
@@ -1824,11 +1965,13 @@ make_translocations <- function(sample) {
       } else {
         df_fusions <- df_putative_fusions
       } # if no rows
-      write.table(df_fusions,fusions_path,row.names=FALSE,col.names=TRUE,quote = FALSE,sep="\t")
-      file_remove_lock(fusions_path)
     } else {
+      # write null file
       gv$log <<- paste0(isolate(gv$log),flog.warn("Can't find: %s. Need to run gridss or Rsubread::Align().",putative_fusion_list))
+      df_fusions <- data.frame(chr=character,start=integer,chr2=character,end=integer,sameStrand=logical,nSupport=integer)
     }
+    write.table(df_fusions,fusions_path,row.names=FALSE,col.names=TRUE,quote = FALSE,sep="\t")
+    file_remove_lock(fusions_path)
   } else {
     gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",fusions_path))
   }
@@ -1952,7 +2095,7 @@ make_gc_plot <- function(gc_file) {
   df_gc$cor <- log10(df_gc$cor)
   df_gc$raw <- log10(df_gc$raw)
 
-  loess_predict <- loess(raw ~ gc, data = df_gc,  span = LOESS_SPAN) # subset = !blacklist
+  loess_predict <- loess(raw ~ gc, data = df_gc,  span = CFG$loess_span) # subset = !blacklist
   correction <- predict(loess_predict,df_gc)
   df_correctable <- df_gc[!is.na(correction),]
   correction_not_na <- correction[!is.na(correction)]
@@ -1963,8 +2106,8 @@ make_gc_plot <- function(gc_file) {
   correction <- max(correction) / correction
   gc_corrected <- correction * df_gc$counts
   # Combine bedfile with counts 
-  bins <- seq(0, 1, by = LOESS_BIN_WIDTH)
-  fapply_median <- function(n,bins) { median(df_gc$raw[df_gc$gc>=(bins[n] - LOESS_BIN_WIDTH) & df_gc$gc<(bins[n] + LOESS_BIN_WIDTH)]) }
+  bins <- seq(0, 1, by = CFG$loess_bin_width)
+  fapply_median <- function(n,bins) { median(df_gc$raw[df_gc$gc>=(bins[n] - CFG$loess_bin_width) & df_gc$gc<(bins[n] + CFG$loess_bin_width)]) }
   bin_medians <- unlist(lapply(1:length(bins),fapply_median,bins))
   loessCorrection_df <- data.frame(gc = bins, median = bin_medians)
   loessCorrection_df$cor <- predict(loess_predict,loessCorrection_df$gc)
@@ -2037,30 +2180,41 @@ read_segmentation_table <- function (filename) {
   
 
 # -------------------------------------------------------------------
-read_counts_table <- function(filename) {
+read_counts_table <- function(filename,whitelist_path,in_parfor = FALSE) {
   pq_boundary <- list (chr1 = 125000000, chr10 =  40200000,  chr11 =  53700000,  chr12 =  35800000,  chr13 =	17900000,  chr14 =	17600000,  chr15 =	19000000,  chr16 =	36600000,  chr17 =	24000000,  chr18 =	17200000,  chr19 =	26500000,  chr2 =	93300000,  chr20 =	27500000,  chr21 =	13200000,  chr22 =	14700000,  chr3 =	91000000,  chr4 =	50400000,  chr5 =	48400000,  chr6 =	61000000,  chr7 =	59900000,  chr8 =	45600000,  chr9 =	49000000,  chrX =	60600000,  chrY =	12500000)
-  whitelist_path = CFG$common_deletion_list
+  if(!in_parfor) { gv$log <<- paste0(isolate(gv$log),flog.info("Reading whitelist from %s.",whitelist_path)) }
   df_whitelist <- read.table(whitelist_path,header=TRUE,stringsAsFactors=FALSE)
   df_roi <- df_whitelist[!is.na(df_whitelist$Gene),c("Gene","Chr","Arm","TestStart","TestEnd")]
   rownames(df_roi) <- df_roi$Gene
-  gv$log <<- paste0(isolate(gv$log),flog.info("Looking at regions for %s.",paste0(df_roi$Gene,collapse = ",")))
-  gv$log <<- paste0(isolate(gv$log),flog.info("Reading counts from %s.",filename))
-  df <- read.table(filename,header=TRUE,stringsAsFactors=FALSE,sep = '\t')
+  if(!in_parfor) { gv$log <<- paste0(isolate(gv$log),flog.info("Looking at regions for %s.",paste0(df_roi$Gene,collapse = ",")))}
+  if(!in_parfor) { gv$log <<- paste0(isolate(gv$log),flog.info("Reading counts from %s.",filename)) }
+  if(file.exists(filename)) {
+    df <- read.table(filename,header=TRUE,stringsAsFactors=FALSE,sep = '\t')  
+  } else {
+    if(!in_parfor) { gv$log <<- paste0(isolate(gv$log),flog.warn("Unable to open %s.",filename)) }
+    return(NULL)
+  }
+  
   s <- sub(".*cnv/","",filename)
   s <- sub("_.*tsv","",s)
   if(ncol(df)==1) {
     colnames(df)[1] <- "raw"
     df$chr <- sub(":.*$","",rownames(df))
-    df$start <- sub("-.*$","",sub("^.*:","",rownames(df)))
-    df$end <- sub("^.*-","",sub("^.*:","",rownames(df)))
+    df$start <- as.integer(sub("-.*$","",sub("^.*:","",rownames(df))))
+    df$end <- as.integer(sub("^.*-","",sub("^.*:","",rownames(df))))
   }
   df$filename <- s
   df$arm <- ifelse(df$start < pq_boundary[df$chr],"p","q")
   df$gene <- ""
-  for (gene in df_roi$Gene) {
-    row <- df_roi[gene,]
-    idx <- ifelse(df$chr == row$Chr & df$end <= row$TestEnd & df$start >= row$TestStart,TRUE,FALSE)
-    df$gene[idx] <- gene
+  df$exon <- ""
+  # Mark a region as being in a gene/exon if there is overlap - judged by the middle of the region being in the feature
+  # For regions that overlap two of these features, assign the features to the second  feature
+  df_mid <- 0.5 * (df$start+df$end)
+  for (gene_exon in df_roi$Gene) {
+    row <- df_roi[gene_exon,]
+    idx <- ifelse(df$chr == row$Chr & (df_mid <= row$TestEnd) & (df_mid >= row$TestStart),TRUE,FALSE)
+    df$exon[idx] <- gene_exon
+    df$gene[idx] <- sub("_.*$" ,"",gene_exon)
   }
   return(df)
 }
@@ -2072,93 +2226,206 @@ make_deletions_stats <- function (make_distributions,file_list,bedtype) {
   if(make_distributions==TRUE) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Making NULL distributions for deletions."))
   }
+  
   #outpath <- makepath(panel = CFG$panel_path,run = CFG$run_path,resolution = bedtype,filetype = "reference",df_cfg = DF_CFG)
   #reference_file_name <- paste0(reference_file_name,".tsv")
   samples_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_samples",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
   mean_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_mean",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
+  med_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_med",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
+  madcv_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_madcv",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
   cv_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_cv",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
-  n_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_n",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
-  
+  n_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_n",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)
+  nraw_file = makepath(panel = CFG$panel_path,sample = "normal_deletions_nraw",run = CFG$run_path,resolution = bedtype,filetype = "reference",extension = ".tsv",df_cfg = DF_CFG)  
+  whitelist_path = CFG$common_deletion_list
+  # df_samples <- do.call(rbind, lapply(file_list,read_counts_table,whitelist_path,TRUE))
   if(make_distributions==TRUE) {
-    if((!file_no_clobber(mean_file))  && (!file_no_clobber(cv_file)) && file_apply_lock(mean_file) && file_apply_lock(cv_file)) { 
-      gv$log <<- paste0(isolate(gv$log),flog.info("Making deletions references. Need %s and %s.",mean_file,cv_file))
-      df_samples <- do.call(rbind, lapply(file_list,read_counts_table))  
+    if((!file_no_clobber(samples_file)) && file_apply_lock(samples_file)) { 
+      gv$log <<- paste0(isolate(gv$log),flog.info("Making deletions references. Reading counts."))
+      cores=detectCores()
+      gv$log <<- paste0(isolate(gv$log),flog.info("Found %d cores. Making cluster with them.",cores))
+      cl <- makeCluster(cores[1]-1,type=CFG$cluster_type)
+      gv$log <<- paste0(isolate(gv$log),flog.info("Registering cluster."))
+      registerDoParallel(cl)
+      gv$log <<- paste0(isolate(gv$log),flog.info("Splitting loop"))
+      read_counts_table_function <- read_counts_table
+      df_samples <- foreach (n=1:length(file_list), .combine=rbind, .verbose=TRUE) %dopar% { df_row <- read_counts_table_function(file_list[n],whitelist_path,TRUE); return(df_row) }
+      stopCluster(cl)  
+      # df_samples <- do.call(rbind, lapply(file_list,read_counts_table,whitelist_path,TRUE))  
       write.table(df_samples,samples_file,row.names=FALSE,sep="\t",quote = FALSE)
+      file_remove_lock(samples_file)
     } else {
-      gv$log <<- paste0(isolate(gv$log),flog.info("Already have deletions references"))
-      return (NULL)
+      gv$log <<- paste0(isolate(gv$log),flog.info("Already have deletions samples for references. Reading %s samples_file",samples_file))
+      df_samples <- read.table(samples_file,sep="\t",header=TRUE,stringsAsFactors=FALSE)
     }
   } else {
-    df_samples <- read_counts_table(file_list)
-  }
+    gv$log <<- paste0(isolate(gv$log),flog.info("Reading file list %s",file_list))
+    df_samples <- read_counts_table(file_list,whitelist_path)
+  }  
+  
   chrs <- unique(df_samples$chr)
   genes <- unique(df_samples$gene[df_samples$gene!=""])
+  exons <- unique(df_samples$exon[df_samples$exon!=""])
   arms <- unique(df_samples$arm)
   samples <- unique(df_samples$filename)
-  subset_names <- c(chrs,paste0(chrs,arms[1]),paste0(chrs,arms[2]),genes)
-  idx_subset_names <- c(chrs,paste0(chrs,arms[1]),paste0(chrs,arms[2]),genes,samples)
-  idx_subsets <- matrix(FALSE,nrow(df_samples),length(idx_subset_names))
-  colnames(idx_subsets) <- idx_subset_names
-  # idx_subsets[,"p53"] <- df_samples$p53 
-  for (gene in genes) { idx_subsets[,gene] <- df_samples$gene == gene }
-  for (sample in samples) { idx_subsets[,sample] <- df_samples$filename == sample }
-  for (chr in chrs) { idx_subsets[,chr] <- df_samples$chr == chr }
-  for (chr in chrs) { idx_subsets[,paste0(chr,"p")] <- idx_subsets[,chr] & df_samples$arm == "p" }
-  for (chr in chrs) { idx_subsets[,paste0(chr,"q")] <- idx_subsets[,chr] & df_samples$arm == "q" }
-  xmean <- matrix(0,length(subset_names),length(subset_names))
-  colnames(xmean) <- subset_names
-  rownames(xmean) <- subset_names
-  xsd <- xmean
-  xcv <- xmean
-  xn <- xmean
+  chr_arms <- c(paste0(chrs,arms[1]),paste0(chrs,arms[2]))
+  all_chrs_names <- c(chrs,paste0(chrs,arms[1]),paste0(chrs,arms[2]))
+  subset_names <- c(chrs,paste0(chrs,arms[1]),paste0(chrs,arms[2]),genes,exons)
+  reference_subset_names <- all_chrs_names
+  
+  n_chrs <- length(chrs)
+  n_all_chrs_names <- length(all_chrs_names)
+  n_chr_arms <- length(chr_arms)
+  n_subsets <- length(subset_names)
+  n_samples <- length(samples)
+  n_genes <- length(genes)
+  n_exons <- length(exons)
+  n_counts <- nrow(df_samples)
+  n_reference_subsets <- length(reference_subset_names)
+
+  idx_subsets_samples <- vector("integer",n_counts)
+  idx_subsets_exons <- vector("integer",n_counts)
+  idx_subsets_genes <- vector("integer",n_counts)
+  idx_subsets_chrs <- vector("integer",n_counts)
+  idx_subsets_chr_arms <- vector("integer",n_counts)
+  
+
   xraw <- df_samples$raw
-  for (s1 in subset_names) {
-    idx1 <- idx_subsets[,s1]# & idx_noise_cutoff
-    if(sum(idx1)>0) {
-      for (s2 in subset_names) {
-        idx2 <- idx_subsets[,s2] # & idx_noise_cutoff
-        if(sum(idx2)>0) {
-          s <- array(0,length(samples))
-          s_ok <- array(FALSE,length(samples))
-          names(s) <- samples
-          names(s_ok) <- samples
-          for (sample in samples) {
-            idxs <- idx_subsets[,sample]
-            idx1s <- (idx1 & idxs)
-            if(sum(idx1s)>0) {
-              idx2s <- (idx2 & idxs)
-              if(sum(idx2s)>0) {
-                s[sample] <- sum(xraw[idx1s]) / sum(xraw[idx2s])
-                s_ok[sample] <- TRUE
-              }
-            }
+  nraw <- matrix(0,n_samples,n_subsets)  
+  
+  if(make_distributions==FALSE || ((!file_no_clobber(nraw_file)) && file_apply_lock(nraw_file))) { 
+    gv$log <<- paste0(isolate(gv$log),flog.info("Making indexes"))
+    for (n in 1:n_samples) { idx_subsets_samples[df_samples$filename == samples[n]] <- n }
+    for (n in 1:n_genes) { idx_subsets_genes[df_samples$gene == genes[n]] <- n }
+    for (n in 1:n_exons) { idx_subsets_exons[df_samples$exon == exons[n]] <- n }
+    for (n in 1:n_chrs) { idx_subsets_chrs[df_samples$chr == chrs[n]] <- n }
+    for (n in 1:n_chr_arms) { idx_subsets_chr_arms[paste0(df_samples$chr,df_samples$arm) == chr_arms[n]] <- n }
+    
+    gv$log <<- paste0(isolate(gv$log),flog.info("Making %s.",nraw_file))
+    cores=detectCores()
+    gv$log <<- paste0(isolate(gv$log),flog.info("Found %d cores. Making cluster with them.",cores))
+    cl <- makeCluster(cores[1]-1,type=CFG$cluster_type)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Registering cluster."))
+    registerDoParallel(cl)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Splitting loop"))
+    master_only_varnames <- c("nraw","df_samples","gv")
+    nraw <- foreach (n=1:n_subsets, .combine=cbind, .verbose=TRUE,.noexport=master_only_varnames) %dopar% {
+      # s1 <- subset_names[n]
+      # gv$log <<- paste0(isolate(gv$log),flog.info("Combining bins n = %d : %s",n,s1))
+      # print(paste0("Combining bins n = ",n," : ",s1))
+      if(n <= n_chrs) { 
+        idx1 <- (idx_subsets_chrs==n)
+      } else if(n > n_chrs && n <= (n_chrs + n_chr_arms)) { 
+        idx1 <- (idx_subsets_chr_arms==(n-n_chrs))
+      } else if (n > (n_chrs + n_chr_arms) && n <= (n_chrs + n_chr_arms + n_genes)) { 
+        idx1 <- (idx_subsets_genes==(n - n_chrs - n_chr_arms)) 
+      } else if (n > (n_chrs + n_chr_arms + n_genes ) && n <= (n_chrs + n_chr_arms + n_genes + n_exons)) { 
+        idx1 <- (idx_subsets_exons==(n - n_chrs - n_chr_arms - n_genes)) 
+      } else {
+        # Parallel index out of range
+        # gv$log <<- paste0(isolate(gv$log),flog.error("Out of range index: %d",n))
+      }
+      nraw_col <- matrix(0,n_samples,1)   
+      if(sum(idx1)>0) {
+        for (m in 1:n_samples) {
+          # gv$log <<- paste0(isolate(gv$log),flog.info("%s.%s",s1,sample))
+          # print(paste0(sample," : ",s1))
+          idx1s <- (idx1 & (idx_subsets_samples==m))
+          if(sum(idx1s)>0) {
+            # nraw[sample,s1] <- sum(xraw[idx1s])
+            nraw_col[m] <- sum(xraw[idx1s])
           }
-          s_n <- sum(s_ok)
-          if(s_n>0) {
-            xmean[s1,s2] <- mean(s[s_ok])
-            if(s_n>1) {
-              xsd[s1,s2] <- sd(s[s_ok])
-            }
-            xn[s1,s2] <- s_n
-            if(s1=="chr1") {
-              gv$log <<- paste0(isolate(gv$log),flog.info("Calculating ratio for %s",s2))
-            }
-            # print(paste0(s1," ",s2," n = ",xn[s1,s2]," mean = ", xmean[s1,s2] ," sd = ",xsd[s1,s2]," cv = ",xsd[s1,s2]/xmean[s1,s2]))
-          } # if s_ok
-        } # if idx2
-      } # for s2
-    } # if idx1
-  } # for s1
-  if(make_distributions==TRUE) {
-    xcv <- xsd / xmean
-    write.table(xcv,cv_file,sep="\t",quote = FALSE)
-    write.table(xmean,mean_file,sep="\t",quote = FALSE)
-    write.table(xn,n_file,sep="\t",quote = FALSE)
-    file_remove_lock(mean_file)
-    file_remove_lock(cv_file)
-  } else {
-    dist_mean <- read.table(mean_file,sep="\t")
-    dist_cv <- read.table(cv_file,sep="\t")
+        }
+      }
+      return(nraw_col)
+    }
+    stopCluster(cl)
+    colnames(nraw) <- subset_names
+    rownames(nraw) <- samples
+    if(make_distributions==TRUE) { 
+      gv$log <<- paste0(isolate(gv$log),flog.info("Done!!! Writing %s.",nraw_file))
+      write.table(nraw,nraw_file,sep="\t",quote = FALSE)
+      file_remove_lock(nraw_file)
+      }
+  } else if(make_distributions==TRUE) {
+      gv$log <<- paste0(isolate(gv$log),flog.info("Reading %s.",nraw_file))
+      nraw <- read.table(nraw_file,header=TRUE,stringsAsFactors=FALSE)
+  }
+    
+  if(make_distributions==FALSE || ((!file_no_clobber(n_file))  && file_apply_lock(n_file))) { 
+    gv$log <<- paste0(isolate(gv$log),flog.info("Making %s and other stats files.",n_file))
+    cores=detectCores()
+    gv$log <<- paste0(isolate(gv$log),flog.info("Found %d cores. Making cluster with them.",cores))
+    cl <- makeCluster(cores[1]-1,type=CFG$cluster_type)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Registering cluster."))
+    registerDoParallel(cl)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Splitting loop"))
+    master_return <- foreach (idx_1=1:n_subsets, .combine=rbind, .verbose=TRUE) %dopar% {
+    # for (idx_1 in 1:n_subsets) {
+      s1 <- subset_names[idx_1]
+      n1 <- nraw[,s1]
+      col_ret <-  matrix(0,1,n_reference_subsets * 5)
+      if(sum(n1)>0) {
+        for (idx_2 in 1:n_reference_subsets) {
+          s2 <- reference_subset_names[idx_2]
+          n2 <- nraw[,s2]
+          if(sum(n2)>0) {
+            # gv$log <<- paste0(isolate(gv$log),flog.info("Calculating ratio for %s:%s",s1,s2))
+            idx_n <- (n2>0)
+            r12 <- n1[idx_n]/n2[idx_n]
+            col_ret[idx_2 + 0 * n_reference_subsets] <-mean(r12)
+            col_ret[idx_2 + 1 * n_reference_subsets] <-median(r12)
+            col_ret[idx_2 + 2 * n_reference_subsets] <-sd(r12)
+            col_ret[idx_2 + 3 * n_reference_subsets] <-mad(r12)
+            col_ret[idx_2 + 4 * n_reference_subsets] <-length(r12)
+            #xmean[s1,s2] <- mean(r12)  
+            #xmed[s1,s2] <- median(r12)  
+            #xsd[s1,s2] <- sd(r12)
+            #xmad[s1,s2] <- mad(r12,xmed[s1,s2])
+            #xn[s1,s2] <- length(r12)
+          }
+        }
+      }
+      return(col_ret)
+    }
+    stopCluster(cl)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Stopped Cluster. Extracting parallel matrices."))
+    xmean <- master_return[,(1 + 0 * n_reference_subsets) : (1 * n_reference_subsets)]
+    xmed  <- master_return[,(1 + 1 * n_reference_subsets) : (2 * n_reference_subsets)]
+    xsd   <- master_return[,(1 + 2 * n_reference_subsets) : (3 * n_reference_subsets)]
+    xmad  <- master_return[,(1 + 3 * n_reference_subsets) : (4 * n_reference_subsets)]
+    xn    <- master_return[,(1 + 4 * n_reference_subsets) : (5 * n_reference_subsets)]
+    gv$log <<- paste0(isolate(gv$log),flog.info("Done"))
+    colnames(xmean) <- reference_subset_names
+    rownames(xmean) <- subset_names
+    colnames(xmed) <- reference_subset_names
+    rownames(xmed) <- subset_names
+    colnames(xsd) <- reference_subset_names
+    rownames(xsd) <- subset_names
+    colnames(xmad) <- reference_subset_names
+    rownames(xmad) <- subset_names
+    colnames(xn) <- reference_subset_names
+    rownames(xn) <- subset_names
+    if(make_distributions==TRUE) {
+      gv$log <<- paste0(isolate(gv$log),flog.info("Writing ratio test references"))
+      xmadcv <- xmad/xmed
+      xcv <- xsd / xmean
+      write.table(xcv,cv_file,sep="\t",quote = FALSE)
+      write.table(xmean,mean_file,sep="\t",quote = FALSE)
+      write.table(xmadcv,madcv_file,sep="\t",quote = FALSE)
+      write.table(xmed,med_file,sep="\t",quote = FALSE)
+      write.table(xn,n_file,sep="\t",quote = FALSE)
+      file_remove_lock(n_file)
+    }
+  } 
+  if (make_distributions==FALSE ){
+    gv$log <<- paste0(isolate(gv$log),flog.info("Reading ratio test references"))
+    dist_mean <- read.table(mean_file,sep="\t",header=TRUE,stringsAsFactors=FALSE)
+    dist_cv <- read.table(cv_file,sep="\t",header=TRUE,stringsAsFactors=FALSE)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Doing ratio test"))
+    # Reference can have extra stuff
+    if(ncol(dist_mean) != ncol(xmean)) { dist_mean <- dist_mean[,colnames(xmean)]}
+    if(ncol(dist_cv) != ncol(xmean)) { dist_cv <- dist_cv[,colnames(xmean)]}
+    
     zscore <- (xmean - dist_mean)/dist_mean/dist_cv
     n <- (xmean/dist_mean) * 2.0
     row_idx <- rowSums(!is.na(zscore))>0  
@@ -2174,7 +2441,7 @@ make_deletions_stats <- function (make_distributions,file_list,bedtype) {
 
 # -------------------------------------------------------------------
 make_deletions_zscores <- function(sample,bedtype) {
-  if(grepl(DEL_ZSCORE_SECTION,bedtype)==FALSE) {
+  if(grepl(CFG$del_zscore_section, bedtype)==FALSE) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Skipping %s",bedtype))
     return(NULL)
   }
@@ -2187,6 +2454,8 @@ make_deletions_zscores <- function(sample,bedtype) {
     df <- make_deletions_stats(FALSE,countspath,bedtype)
     write.table(df,delpath,row.names=TRUE,col.names = NA,sep="\t",quote = FALSE)
     file_remove_lock(delpath)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Making zscore plots"))
+    plot_deletions_zscores(df,delpath)
     return (NULL)
   } else {
     gv$log <<- paste0(isolate(gv$log),flog.info("Already have deletion zscores for %s",delpath))
@@ -2196,15 +2465,54 @@ make_deletions_zscores <- function(sample,bedtype) {
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-if(RSTUDIO_DEBUG) { 
+plot_deletions_zscores <- function(df,delpath) {
+  sample_name <- sub(".*/1","1",sub("_del_zscore.tsv","",delpath))
+  dfz <- data.frame(t(df))
+  dfz$bintype <- ifelse(grepl("_ex",rownames(dfz)),"exon","gene")
+  dfz$bintype[grepl("chr",rownames(dfz))] <- "chr"
+  dfz$zsdr <-  dfz$zscore_med/(dfz$n_med-2)
+  dfz$empirical_sd <-  (dfz$n_med-2)/dfz$zscore_med
+  dfz$id <- rownames(dfz)
+  z_sd <- sd(dfz$zscore_med)
+  median_sd <- median(dfz$empirical_sd)
+  
+  dfz$outlier_z <- ((dfz$zscore_med > 2 * z_sd) | (dfz$zscore_med < -2 * z_sd))
+  dfz$outlier_sd <-  dfz$empirical_sd > median_sd * 2
+  dfz$outlier <- dfz$outlier_sd | dfz$outlier_z
+  dfout <- dfz[dfz$outlier,]
+
+  dfzpath <- sub("_del_zscore.tsv","_plotted_del_zscore.tsv",delpath)
+  write.table(dfz,dfzpath,row.names=TRUE,col.names = NA,sep="\t",quote = FALSE)
+  
+  p <- ggplot() + 
+    geom_point(data=dfz,aes(x=zscore_med,y=n_med-2,colour=bintype),size = 0.5) +
+    ggtitle(sample_name) +
+    xlim(c(-3,3)) +
+    ylim(c(-3,3))
+    # geom_text_repel(data = dfout, aes(x=zscore_med,y=n_med-2, label =id), size = 3)
+  pngfile <- sub("_del_zscore.tsv","_delta_n_vs_zscore.png",delpath)
+  ggsave(pngfile)
+
+  p <- ggplot() + 
+    geom_point(data=dfz,aes(x=zscore_med,y=empirical_sd,colour=bintype),size = 0.5) +
+    ggtitle(sample_name) +
+    xlim(c(-3,3)) +
+    ylim(c(0,2)) 
+    # geom_text_repel(data = dfout, aes(x=zscore_med,y=empirical_sd, label = id), size = 3)
+  pngfile <- sub("_del_zscore.tsv","_sd_vs_zscore.png",delpath)
+  ggsave(pngfile)
+  
+}
+# -------------------------------------------------------------------
+
+# -------------------------------------------------------------------
+if(CFG_DEFAULTS$rstudio_debug) { 
   ret <- makeCNTables(args) 
   return(ret)
 }
 # -------------------------------------------------------------------
-if(isCommandLine) {
+if(CFG_DEFAULTS$is_command_line) {
   ret <- makeCNTables(args) 
   quit(save = "no", status = ret)
 }
 # -------------------------------------------------------------------
-
-
