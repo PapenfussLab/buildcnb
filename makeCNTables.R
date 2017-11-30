@@ -41,6 +41,7 @@ CFG_DEFAULTS <- list(
   snp_max_reads = 1000,   # For PCR artifacts # TODO: Change for RNA-seq
   segment_verbosity  = 0,
   fusion_section = "targeted",
+  minimumFusionSuport = 10, # minimum reads spanning two breakpoints to be reported
   baf_section = "targeted",
   vcf_section = "targeted",
   del_section = "wg_medium",
@@ -53,13 +54,29 @@ CFG_DEFAULTS <- list(
   baf_max_merge_iterations = 100,
   enforce_matched_reference = TRUE,
   minimum_hist_bins = 100,
-  cluster_type = "FORK"
+  cluster_type = "FORK",
+  cluster_cpus = 6, # how many cluster doParallel asks for. Giving problems on slurm.
+  prebuild_references = TRUE,
+  store_by_panel = TRUE,
+  make_what = "alias,bin,gc_table,reference,bam,count,references_for_bedtype,corrected_count,vcf,baf,deletion,deletions_zscore,translocation,infile",
+  clobber_locked_files = "FALSE",
+  reference_variables = "TumourNormal=Tumour|Normal;Sex=Male|Female;SampleType=Fresh|FFPE",
+  min_reference_samples = 4,
+  wg_gc_correct = FALSE,
+  targeted_gc_correct = TRUE,
+  off_target_gc_correct = FALSE,
+  no_clobber = TRUE,
+  number_of_cores = 1,
+  wg_label = "Whole Genome",
+  targeted_label = "Targeted",
+  dcf_file = "default.dcf",
+  pq_boundary = list (chr1 = 125000000, chr10 =  40200000,  chr11 =  53700000,  chr12 =  35800000,  chr13 =	17900000,  chr14 =	17600000,  chr15 =	19000000,  chr16 =	36600000,  chr17 =	24000000,  chr18 =	17200000,  chr19 =	26500000,  chr2 =	93300000,  chr20 =	27500000,  chr21 =	13200000,  chr22 =	14700000,  chr3 =	91000000,  chr4 =	50400000,  chr5 =	48400000,  chr6 =	61000000,  chr7 =	59900000,  chr8 =	45600000,  chr9 =	49000000,  chrX =	60600000,  chrY =	12500000)
 )
 
 # Try and figure out if we are being debugged in Rstudio
 # debugSource('~/mm/cnv/buildcnb/makeCNTables.R', echo=TRUE)
 CFG_DEFAULTS$rstudio_debug <- (length(args)==0)
-if(CFG_DEFAULTS$rstudio_debug){ args <- "test.dcf" }
+if(CFG_DEFAULTS$rstudio_debug){ args <- CFG_DEFAULTS$dcf_file }
 CFG_DEFAULTS$is_command_line <- !CFG_DEFAULTS$rstudio_debug && length(args)>0 && args[1]!="RStudio" &&  !grepl("R$",args) 
 
 # Wrong use from command line
@@ -1579,14 +1596,18 @@ make_bams <- function(sample) {
             nBestLocations = 16,
             detectSV=TRUE
       )
+      if(file.info(bampath)$size <= 1) { ret = -1 }
     }
     lapply(c("fixbam","sam","tmp","bin","fastq.gz"), remove_files_by_suffix)
-    file_remove_lock(bampath)
-    setwd(cwd)
     if(ret!=0) {
          gv$log <<- paste0(isolate(gv$log),flog.error("subread-align failed."))
          gv$broken <<- TRUE
+    } else {
+         
+         file_remove_lock(bampath)
+         # gv$log <<- paste0(isolate(gv$log),flog.info("Created %s: %d bytes",bampath,file.info(bampath)$size))
     }
+    setwd(cwd)
     return (NULL)
   } else {
     gv$log <<- paste0(isolate(gv$log),flog.info("Already have: %s",bampath))
@@ -1679,17 +1700,25 @@ make_bafs <- function(sample) {
                            start = start(ranges(rowRanges(vcf[idx]))), 
                            end = end(ranges(rowRanges(vcf[idx]))), 
                            freq = as.double(snvinfo$MM)/as.double(snvinfo$DP), 
-                           ref_reads = as.double(snvinfo$DP), 
+                           read_depth = as.double(snvinfo$DP), 
                            alt_reads = as.double(snvinfo$MM),
+                           ref_reads = (as.double(snvinfo$DP) - as.double(snvinfo$MM)),
                            stringsAsFactors = FALSE)
     }
     else {
       gv$log <<- paste0(isolate(gv$log),flog.warn("Empty VCF file. Writing a fake row."))    
       df_baf <- data.frame(chr = "MT", start = 1, end = 1, freq = 0, ref_reads = 0, alt_reads = 0,stringsAsFactors = FALSE)   
-    }        
-    idx <- grepl("GL",df_baf$chr) | grepl("MT",df_baf$chr) | df_baf$alt_reads >= CFG$snp_max_reads | df_baf$ref_reads >= CFG$snp_max_reads 
+    } 
+    gv$log <<- paste0(isolate(gv$log),flog.info("Have %d entries from vcf before removal unwanted rows.",nrow(df_baf)))        
+    idx <- grepl("GL",df_baf$chr) | 
+          grepl("MT",df_baf$chr) | 
+          df_baf$alt_reads >= CFG$snp_max_reads | 
+          df_baf$ref_reads >= CFG$snp_max_reads 
+#          df_baf$alt_reads <= CFG$snp_min_mismatches |
+#          df_baf$ref_reads <= CFG$snp_min_mismatches 
     df_baf <- df_baf[!idx,]
     if(nrow(df_baf) > CFG$baf_max_rows) { gv$log <<- paste0(isolate(gv$log),flog.info("Have %d entries - need to merge some.",nrow(df_baf))) }
+	    else { gv$log <<- paste0(isolate(gv$log),flog.info("Have %d entries from vcf after removal of GL, MT and support >  %d.",nrow(df_baf),CFG$snp_max_reads)) }
     niter = 1
     merge_distance <- CFG$baf_merge_distance
     while (nrow(df_baf) > CFG$baf_max_rows && niter < CFG$baf_max_merge_iterations) {
@@ -1745,7 +1774,10 @@ make_bafs <- function(sample) {
       niter = niter + 1
     }
     
-    
+    if(nrow(df_baf)==0) {
+      gv$log <<- paste0(isolate(gv$log),flog.warn("Empty VCF file. Writing a fake row."))    
+      df_baf <- data.frame(chr = "MT", start = 1, end = 1, freq = 0, ref_reads = 0, alt_reads = 0,stringsAsFactors = FALSE)   
+    }
     gv$log <<- paste0(isolate(gv$log),flog.info("Writing %s with %d entries",bafpath,nrow(df_baf)))    
     write.table(df_baf,bafpath,row.names=FALSE,quote = FALSE,sep="\t")
     file_remove_lock(bafpath)
@@ -1917,9 +1949,11 @@ make_translocations <- function(sample) {
     if(file.exists(putative_fusion_list)) {
       gv$log <<- paste0(isolate(gv$log),flog.info("Reading %s",putative_fusion_list))
       df_putative_fusions <- read.table(putative_fusion_list,header=TRUE,comment.char = "#",stringsAsFactors=FALSE)
+      gv$log <<- paste0(isolate(gv$log),flog.info("Found: %d rows %d cols",nrow(df_putative_fusions),ncol(df_putative_fusions)))
+      colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",  "end",      "sameStrand",   "nSupport","BreakPoint1_GoUp","BreakPoint2_GoUp")[1:ncol(df_putative_fusions)]
+      df_putative_fusions <- df_putative_fusions[df_putative_fusions$nSupport>=CFG$minimumFusionSuport,]
+      gv$log <<- paste0(isolate(gv$log),flog.info("After filtering out support < %d: %d rows %d cols",CFG$minimumFusionSuport,nrow(df_putative_fusions),ncol(df_putative_fusions)))
       gv$log <<- paste0(isolate(gv$log),flog.info("Making: %s",fusions_path))
-      # colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",  "end",	"sameStrand",	"nSupport")
-      colnames(df_putative_fusions) <- c("chr",  "start",  "chr2",  "end",	"sameStrand",	"nSupport","BreakPoint1_GoUp","BreakPoint2_GoUp")[1:ncol(df_putative_fusions)]
       if(nrow(df_putative_fusions) > 0) {
         rownames(df_putative_fusions) <- df_putative_fusions$ID
         df_putative_fusions$idx1 <- 0
@@ -2181,12 +2215,11 @@ read_segmentation_table <- function (filename) {
 
 # -------------------------------------------------------------------
 read_counts_table <- function(filename,whitelist_path,in_parfor = FALSE) {
-  pq_boundary <- list (chr1 = 125000000, chr10 =  40200000,  chr11 =  53700000,  chr12 =  35800000,  chr13 =	17900000,  chr14 =	17600000,  chr15 =	19000000,  chr16 =	36600000,  chr17 =	24000000,  chr18 =	17200000,  chr19 =	26500000,  chr2 =	93300000,  chr20 =	27500000,  chr21 =	13200000,  chr22 =	14700000,  chr3 =	91000000,  chr4 =	50400000,  chr5 =	48400000,  chr6 =	61000000,  chr7 =	59900000,  chr8 =	45600000,  chr9 =	49000000,  chrX =	60600000,  chrY =	12500000)
   if(!in_parfor) { gv$log <<- paste0(isolate(gv$log),flog.info("Reading whitelist from %s.",whitelist_path)) }
   df_whitelist <- read.table(whitelist_path,header=TRUE,stringsAsFactors=FALSE)
   df_roi <- df_whitelist[!is.na(df_whitelist$Gene),c("Gene","Chr","Arm","TestStart","TestEnd")]
   rownames(df_roi) <- df_roi$Gene
-  if(!in_parfor) { gv$log <<- paste0(isolate(gv$log),flog.info("Looking at regions for %s.",paste0(df_roi$Gene,collapse = ",")))}
+  # if(!in_parfor) { gv$log <<- paste0(isolate(gv$log),flog.info("Looking at regions for %s.",paste0(df_roi$Gene,collapse = ",")))}
   if(!in_parfor) { gv$log <<- paste0(isolate(gv$log),flog.info("Reading counts from %s.",filename)) }
   if(file.exists(filename)) {
     df <- read.table(filename,header=TRUE,stringsAsFactors=FALSE,sep = '\t')  
@@ -2199,12 +2232,13 @@ read_counts_table <- function(filename,whitelist_path,in_parfor = FALSE) {
   s <- sub("_.*tsv","",s)
   if(ncol(df)==1) {
     colnames(df)[1] <- "raw"
+    df$range <- rownames(df)
     df$chr <- sub(":.*$","",rownames(df))
     df$start <- as.integer(sub("-.*$","",sub("^.*:","",rownames(df))))
     df$end <- as.integer(sub("^.*-","",sub("^.*:","",rownames(df))))
   }
   df$filename <- s
-  df$arm <- ifelse(df$start < pq_boundary[df$chr],"p","q")
+  df$arm <- ifelse(df$start < CFG$pq_boundary[df$chr],"p","q")
   df$gene <- ""
   df$exon <- ""
   # Mark a region as being in a gene/exon if there is overlap - judged by the middle of the region being in the feature
@@ -2242,15 +2276,18 @@ make_deletions_stats <- function (make_distributions,file_list,bedtype) {
     if((!file_no_clobber(samples_file)) && file_apply_lock(samples_file)) { 
       gv$log <<- paste0(isolate(gv$log),flog.info("Making deletions references. Reading counts."))
       cores=detectCores()
-      gv$log <<- paste0(isolate(gv$log),flog.info("Found %d cores. Making cluster with them.",cores))
-      cl <- makeCluster(cores[1]-1,type=CFG$cluster_type)
+      gv$log <<- paste0(isolate(gv$log),flog.info("Found %d cores. Making cluster with %d of them.",cores,CFG$cluster_cpus))
+      cl <- makeCluster(CFG$cluster_cpus,type=CFG$cluster_type)
       gv$log <<- paste0(isolate(gv$log),flog.info("Registering cluster."))
       registerDoParallel(cl)
       gv$log <<- paste0(isolate(gv$log),flog.info("Splitting loop"))
       read_counts_table_function <- read_counts_table
-      df_samples <- foreach (n=1:length(file_list), .combine=rbind, .verbose=TRUE) %dopar% { df_row <- read_counts_table_function(file_list[n],whitelist_path,TRUE); return(df_row) }
+      if(CFG$cluster_cpus==1) {
+        df_samples <- do.call(rbind, lapply(file_list,read_counts_table,whitelist_path,FALSE))  
+      } else {
+        df_samples <- foreach (n=1:length(file_list), .combine=rbind, .verbose=TRUE) %dopar% { df_row <- read_counts_table_function(file_list[n],whitelist_path,TRUE); return(df_row) }
+      }
       stopCluster(cl)  
-      # df_samples <- do.call(rbind, lapply(file_list,read_counts_table,whitelist_path,TRUE))  
       write.table(df_samples,samples_file,row.names=FALSE,sep="\t",quote = FALSE)
       file_remove_lock(samples_file)
     } else {
@@ -2302,8 +2339,8 @@ make_deletions_stats <- function (make_distributions,file_list,bedtype) {
     
     gv$log <<- paste0(isolate(gv$log),flog.info("Making %s.",nraw_file))
     cores=detectCores()
-    gv$log <<- paste0(isolate(gv$log),flog.info("Found %d cores. Making cluster with them.",cores))
-    cl <- makeCluster(cores[1]-1,type=CFG$cluster_type)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Found %d cores. Making cluster with %d them.",cores,CFG$cluster_cpus))
+    cl <- makeCluster(CFG$cluster_cpus,type=CFG$cluster_type)
     gv$log <<- paste0(isolate(gv$log),flog.info("Registering cluster."))
     registerDoParallel(cl)
     gv$log <<- paste0(isolate(gv$log),flog.info("Splitting loop"))
@@ -2327,11 +2364,8 @@ make_deletions_stats <- function (make_distributions,file_list,bedtype) {
       nraw_col <- matrix(0,n_samples,1)   
       if(sum(idx1)>0) {
         for (m in 1:n_samples) {
-          # gv$log <<- paste0(isolate(gv$log),flog.info("%s.%s",s1,sample))
-          # print(paste0(sample," : ",s1))
           idx1s <- (idx1 & (idx_subsets_samples==m))
           if(sum(idx1s)>0) {
-            # nraw[sample,s1] <- sum(xraw[idx1s])
             nraw_col[m] <- sum(xraw[idx1s])
           }
         }
@@ -2354,8 +2388,8 @@ make_deletions_stats <- function (make_distributions,file_list,bedtype) {
   if(make_distributions==FALSE || ((!file_no_clobber(n_file))  && file_apply_lock(n_file))) { 
     gv$log <<- paste0(isolate(gv$log),flog.info("Making %s and other stats files.",n_file))
     cores=detectCores()
-    gv$log <<- paste0(isolate(gv$log),flog.info("Found %d cores. Making cluster with them.",cores))
-    cl <- makeCluster(cores[1]-1,type=CFG$cluster_type)
+    gv$log <<- paste0(isolate(gv$log),flog.info("Found %d cores. Making cluster with %d them.",cores,CFG$cluster_cpus))
+    cl <- makeCluster(CFG$cluster_cpus,type=CFG$cluster_type)
     gv$log <<- paste0(isolate(gv$log),flog.info("Registering cluster."))
     registerDoParallel(cl)
     gv$log <<- paste0(isolate(gv$log),flog.info("Splitting loop"))
@@ -2446,59 +2480,96 @@ make_deletions_zscores <- function(sample,bedtype) {
     return(NULL)
   }
   delpath <- makepath(panel = CFG$panel_path ,run = CFG$run_path ,sample = sample ,filetype = "sv",resolution = bedtype, extension = "_del_zscore.tsv",df_cfg = DF_CFG)
+  df_files <- data.frame(
+    sample = sample,
+    path = delpath,
+    file = "counts",
+    resolution = "off_target", # DANGER: Temporary hack to put it in the browser
+    is_targeted = grepl("target",CFG$del_zscore_section),
+    is_wgs = !grepl("target",CFG$del_zscore_section),
+    stringsAsFactors = FALSE
+  )
+  
   if(!file_no_clobber(delpath) && file_apply_lock(delpath)) {
     gv$log <<- paste0(isolate(gv$log),flog.info("Making deletions zscores: %s.",delpath))
     cnvpath <- makepath(panel = CFG$panel,run = CFG$run_path,sample = sample,filetype = "cnv",resolution = bedtype, extension = ".tsv",df_cfg = DF_CFG)
     countspath <- sub(".tsv$","_fc_counts.tsv",cnvpath)
     gv$log <<- paste0(isolate(gv$log),flog.info("Reading %s",countspath))
     df <- make_deletions_stats(FALSE,countspath,bedtype)
-    write.table(df,delpath,row.names=TRUE,col.names = NA,sep="\t",quote = FALSE)
+    df_cn <- data.frame(t(df))
+    df_cn$id <- rownames(df_cn)
+    df_whitelist <- read.table(CFG$common_deletion_list,header=TRUE,stringsAsFactors=FALSE)
+    df_gene <- df_whitelist[grepl("_ex1$",df_whitelist$Gene),]
+    df_gene$Gene <- sub("_ex1","",df_gene$Gene )
+    chrs <- paste0("chr",c(1:22,"X","Y"),c(rep("",24),rep("p",24),rep("q",24)))
+    df_chr <- data.frame(row.names = chrs,
+                         chr = c(chrs[1:24],chrs[1:24],chrs[1:24]),
+                         start = c(rep(1,24),rep(1,24),as.integer(unlist(CFG$pq_boundary[chrs[1:24]]))),
+                         end = c(rep(1,24),rep(1,24),as.integer(unlist(CFG$pq_boundary[chrs[1:24]]))),    
+                         stringsAsFactors = F)
+    df_regions <- rbind(df_whitelist,df_gene)
+    rownames(df_regions) <- df_regions$Gene
+    df_regions <- df_regions[,c("Chr","TestStart","TestEnd")]
+    colnames(df_regions) <- c("chr","start","end")
+    df_regions <- rbind(df_chr,df_regions)
+    df_regions$id <- rownames(df_regions)
+    df <- merge(df_regions,df_cn,by = "id")
+    df$N <- df$n_med
+    df$Nsd <- (df$N-2) / df$zscore_med
+    df$Nlow <- ifelse(df$N>df$Nsd,df$N-df$Nsd,0)
+    df$Nhigh <- df$N+df$Nsd
+    rownames(df) <- df$id
+    df <- df[,c("chr","start","end","zscore_med","n_med","Nsd","Nlow","Nhigh","id")]
+    colnames(df) <- c("chr","start","end","zscore","N","Nsd","Nlow","Nhigh","id")
+    write.table(df,delpath,row.names=FALSE,sep="\t",quote = FALSE)
     file_remove_lock(delpath)
     gv$log <<- paste0(isolate(gv$log),flog.info("Making zscore plots"))
     plot_deletions_zscores(df,delpath)
-    return (NULL)
+    return (df_files)
   } else {
     gv$log <<- paste0(isolate(gv$log),flog.info("Already have deletion zscores for %s",delpath))
-    return (NULL)
+    return (df_files)
   }
 }
 # -------------------------------------------------------------------
 
 # -------------------------------------------------------------------
-plot_deletions_zscores <- function(df,delpath) {
+plot_deletions_zscores <- function(dfz,delpath) {
   sample_name <- sub(".*/1","1",sub("_del_zscore.tsv","",delpath))
-  dfz <- data.frame(t(df))
   dfz$bintype <- ifelse(grepl("_ex",rownames(dfz)),"exon","gene")
-  dfz$bintype[grepl("chr",rownames(dfz))] <- "chr"
-  dfz$zsdr <-  dfz$zscore_med/(dfz$n_med-2)
-  dfz$empirical_sd <-  (dfz$n_med-2)/dfz$zscore_med
+  # dfz$bintype[grepl("chr",rownames(dfz))] <- "chr"
+  dfz$zsdr <-  dfz$zscore/(dfz$N-2)
+  dfz$sd <-  (dfz$N-2)/dfz$zscore
   dfz$id <- rownames(dfz)
-  z_sd <- sd(dfz$zscore_med)
-  median_sd <- median(dfz$empirical_sd)
+  z_sd <- sd(dfz$zscore)
+  median_sd <- median(dfz$sd)
   
-  dfz$outlier_z <- ((dfz$zscore_med > 2 * z_sd) | (dfz$zscore_med < -2 * z_sd))
-  dfz$outlier_sd <-  dfz$empirical_sd > median_sd * 2
+  dfz$outlier_z <- ((dfz$zscore > 2 * z_sd) | (dfz$zscore < -2 * z_sd))
+  dfz$outlier_sd <-  dfz$sd > median_sd * 2
   dfz$outlier <- dfz$outlier_sd | dfz$outlier_z
+  dfz$bintype <- "ok"
+  dfz$bintype[dfz$outlier_sd] <- "sd"
+  dfz$bintype[dfz$outlier_z] <- "z_score"
   dfout <- dfz[dfz$outlier,]
 
   dfzpath <- sub("_del_zscore.tsv","_plotted_del_zscore.tsv",delpath)
   write.table(dfz,dfzpath,row.names=TRUE,col.names = NA,sep="\t",quote = FALSE)
   
   p <- ggplot() + 
-    geom_point(data=dfz,aes(x=zscore_med,y=n_med-2,colour=bintype),size = 0.5) +
+    geom_point(data=dfz,aes(x=zscore,y=N-2,colour=bintype),size = 1) +
     ggtitle(sample_name) +
-    xlim(c(-3,3)) +
-    ylim(c(-3,3))
+    xlim(c(-8,8)) +
+    ylim(c(-2,4))
     # geom_text_repel(data = dfout, aes(x=zscore_med,y=n_med-2, label =id), size = 3)
   pngfile <- sub("_del_zscore.tsv","_delta_n_vs_zscore.png",delpath)
   ggsave(pngfile)
 
   p <- ggplot() + 
-    geom_point(data=dfz,aes(x=zscore_med,y=empirical_sd,colour=bintype),size = 0.5) +
+    geom_point(data=dfz,aes(x=zscore,y=sd,colour=bintype),size = 1) +
     ggtitle(sample_name) +
-    xlim(c(-3,3)) +
+    xlim(c(-8,8)) +
     ylim(c(0,2)) 
-    # geom_text_repel(data = dfout, aes(x=zscore_med,y=empirical_sd, label = id), size = 3)
+    # geom_text_repel(data = dfout, aes(x=zscore,y=sd, label = id), size = 3)
   pngfile <- sub("_del_zscore.tsv","_sd_vs_zscore.png",delpath)
   ggsave(pngfile)
   
